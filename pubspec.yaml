@@ -1,0 +1,42 @@
+name: kingcric
+description: "KingCric - Har Ball, Har Stat, King Jaisa. Full cricket analytics: live scores, deep player stats, H2H, venue records, predictions."
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.1.2
+  http: ^1.2.0
+  shared_preferences: ^2.2.2
+  intl: ^0.20.2
+  # NOTE (startup-crash fix, 2026-10-17): cached_network_image was REMOVED.
+  # It was never used in Dart code (zero references), but it pulled in
+  # flutter_cache_manager -> sqflite -> jni_flutter, enlarging the
+  # plugin set for no benefit. NOTE: shared_preferences_android ALSO
+  # depends on `jni`, so removing cached_network_image alone does NOT
+  # remove JniPlugin from the registrant. The REAL crash fix is that
+  # the manual APK pipeline now bundles libdartjni.so per ABI (built
+  # from the jni package's src/CMakeLists.txt with the NDK) — without
+  # it, JniPlugin's static initializer System.loadLibrary("dartjni")
+  # throws UnsatisfiedLinkError (an Error, NOT catchable by the
+  # registrant's catch(Exception)) during FlutterEngine init, killing
+  # the app on launch ("failed to start several times").
+  # If image caching is ever needed, re-add it ONLY with a real
+  # `flutter build apk` (which bundles libdartjni.so) — never with the
+  # manual pipeline unless libdartjni.so is also bundled per ABI.
+  # AdMob is a placeholder in this scaffold: add google_mobile_ads only
+  # when you have a real AdMob account + app id. Keeping it commented
+  # keeps the scaffold 100% free and runnable without ad credentials.
+  # google_mobile_ads: ^5.1.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.1
+
+flutter:
+  uses-material-design: true
