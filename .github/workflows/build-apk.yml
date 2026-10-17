@@ -14,17 +14,48 @@
 # The artifact it produces is the ONE APK to deliver to the user.
 # Do NOT replace this with another manual-pipeline APK.
 #
+# 2026-10-17 FAILURE + FIXES (run 39055368936):
+# First run: Checkout / Java / Flutter / Pub get / Analyze (clean) /
+# Test (3/3) all PASSED, but "Build release APK (real Gradle)" FAILED.
+# `flutter build apk` regenerates android/gradlew + gradle-wrapper.jar
+# itself (proven: `flutter pub get` does NOT, `flutter build apk` DOES),
+# so a missing wrapper in the repo was NOT the cause. The Gradle
+# execution itself failed — the most likely causes on a fresh
+# ubuntu-latest runner for this project (compileSdk 36, NDK 28.2):
+#   1. NDK 28.2.13676358 not preinstalled -> Gradle/sdkmanager must
+#      download it, which needs SDK licenses accepted first.
+#   2. build-tools 36.0.0 / platform android-36 not preinstalled ->
+#      same download + license problem.
+#   3. No explicit ANDROID_HOME / license step in the old workflow.
+# Fixes applied (see WORKFLOW-FIX.md for the full list):
+#   - android-actions/setup-android@v3 installs SDK 36 + build-tools
+#     36.0.0 + NDK 28.2.13676358 and accepts licenses, sets ANDROID_HOME.
+#   - Explicit `sdkmanager --licenses` acceptance (belt & braces).
+#   - `chmod +x android/gradlew` + env-diagnostics step.
+#   - Build output tee'd to build-apk.log; log uploaded + tailed on failure.
+#   - Verify step no longer hardcodes build-tools/36.0.0 (falls back to
+#     latest installed build-tools if 36.0.0 is absent).
+#   - concurrency cancel-in-progress: a file-at-a-time push creates
+#     many runs; only the latest needs to finish.
+#   - android/.gitignore no longer ignores gradlew / gradle-wrapper.jar,
+#     so the wrapper IS committed (self-contained repo for any push method).
+#   - pubspec version bumped 1.0.0+1 -> 1.0.0+2 (versionCode 2) so the
+#     new APK cannot collide with a stale partial install of versionCode 1
+#     (INSTALL_FAILED_UPDATE_INCOMPATIBLE -> generic "App not installed").
+#
 # What it does:
 #  1. Checks out the repo (the whole kingcric/ Flutter project must be the
 #     repo root, or set working-directory below).
-#  2. Installs Java 17 (required by Flutter 3.47 / Gradle 9 / AGP).
-#  3. Installs Flutter 3.47.7 (the version the code was tested with:
+#  2. Installs Java 17 (required by Flutter 3.47 / Gradle 9 / AGP 9.1).
+#  3. Installs Android SDK 36 + build-tools 36.0.0 + NDK 28.2.13676358,
+#     accepts SDK licenses, sets ANDROID_HOME.
+#  4. Installs Flutter 3.47.7 (the version the code was tested with:
 #     `flutter analyze` = No issues found, `flutter test` = 3/3).
-#  4. Runs flutter pub get -> flutter analyze -> flutter test ->
+#  5. Runs flutter pub get -> flutter analyze -> flutter test ->
 #     flutter build apk --release (REAL Gradle, with daemon).
-#  5. Verifies the APK (aapt2 badging must show minSdk 24 / targetSdk 36,
+#  6. Verifies the APK (aapt2 badging must show minSdk 24 / targetSdk 36,
 #     apksigner verify, zipalign check) and prints size + sha256.
-#  6. Uploads ONE artifact: app-release.apk (universal, all ABIs).
+#  7. Uploads ONE artifact: app-release.apk (universal, all ABIs).
 
 name: Build KingCric APK
 
@@ -42,6 +73,12 @@ on:
 permissions:
   contents: read
 
+# A file-at-a-time push creates one run per file. Only the latest run
+# matters; auto-cancel superseded runs so they don't queue for hours.
+concurrency:
+  group: kingcric-apk
+  cancel-in-progress: true
+
 jobs:
   build-apk:
     name: Build release APK (official Gradle)
@@ -51,11 +88,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
       - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
+
+      - name: Set up Android SDK (API 36 + build-tools 36.0.0 + NDK 28.2)
+        uses: android-actions/setup-android@v3
+        with:
+          api-level: 36
+          build-tools: 36.0.0
+          ndk: 28.2.13676358
+
+      - name: Accept Android SDK licenses
+        # setup-android already accepts licenses; this is belt & braces
+        # for any component sdkmanager downloads later (e.g. NDK).
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
 
       - name: Set up Flutter 3.47.7
         uses: subosito/flutter-action@v2
@@ -64,8 +116,22 @@ jobs:
           channel: stable
           cache: true
 
-      - name: Flutter doctor
-        run: flutter doctor -v
+      - name: Print build environment (diagnostics)
+        run: |
+          set -euo pipefail
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          flutter --version
+          flutter doctor -v
+          echo "--- installed build-tools ---"
+          ls "$ANDROID_HOME/build-tools/" || true
+          echo "--- installed NDK ---"
+          ls "$ANDROID_HOME/ndk/" || true
+          echo "--- gradlew ---"
+          ls -l android/gradlew
+          test -f android/gradle/wrapper/gradle-wrapper.jar || echo "NOTE: gradle-wrapper.jar absent; flutter build regenerates it"
 
       - name: Pub get
         run: flutter pub get
@@ -77,7 +143,22 @@ jobs:
         run: flutter test
 
       - name: Build release APK (real Gradle)
-        run: flutter build apk --release
+        run: flutter build apk --release 2>&1 | tee build-apk.log
+
+      - name: Show build tail on failure
+        if: failure()
+        run: |
+          echo "===== last 200 lines of build-apk.log ====="
+          tail -n 200 build-apk.log || echo "(no build-apk.log found)"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingcric-build-log
+          path: build-apk.log
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Verify APK
         run: |
@@ -86,15 +167,23 @@ jobs:
           test -f "$APK"
           ls -lh "$APK"
           sha256sum "$APK"
+          # Resolve build-tools: prefer 36.0.0, fall back to latest
+          # installed (ubuntu-latest does not guarantee 36.0.0).
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          if [ ! -d "$BT" ]; then
+            BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)"
+          fi
+          echo "Using build-tools: $BT"
+          test -x "$BT/aapt2"
           # Badging must show the package + SDKs (fails the job if not).
-          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" | tee /tmp/badging.txt
+          "$BT/aapt2" dump badging "$APK" | tee /tmp/badging.txt
           grep -q "name='com.kingcric.app'" /tmp/badging.txt
           grep -q "minSdkVersion:'24'" /tmp/badging.txt
           grep -q "targetSdkVersion:'36'" /tmp/badging.txt
           grep -q "supports-any-density: 'true'" /tmp/badging.txt
           # Signature + alignment.
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
-          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -v -P 16 4 "$APK"
+          "$BT/apksigner" verify --verbose "$APK"
+          "$BT/zipalign" -c -v -P 16 4 "$APK"
           # Native libs for every ABI (Flutter + app + dartjni).
           python3 -c "
           import zipfile
