@@ -1,0 +1,117 @@
+# KingCric — Official Gradle APK build on GitHub Actions
+#
+# WHY THIS EXISTS (2026-10-17):
+# The VM's sandbox blocks ALL Java-process outbound TCP, which breaks the
+# Gradle daemon's loopback TCP socket ("Could not receive a message from
+# the daemon"). Every APK produced in the VM therefore had to be assembled
+# by a manual Gradle-free pipeline (bundle -> gen_snapshot -> dex -> aapt2
+# -> zipalign -> apksigner). Those manual APKs passed aapt2/apksigner/
+# zipalign checks locally, yet repeatedly failed to install on a real
+# Realme GT 6T ("App not installed" / "isn't compatible"), even after
+# fixing libdartjni.so, the Crown + Bat-Ball icon, and <uses-sdk>.
+# This workflow builds the APK with REAL Gradle on GitHub's runner,
+# where there is no such TCP block — the official Flutter build path.
+# The artifact it produces is the ONE APK to deliver to the user.
+# Do NOT replace this with another manual-pipeline APK.
+#
+# What it does:
+#  1. Checks out the repo (the whole kingcric/ Flutter project must be the
+#     repo root, or set working-directory below).
+#  2. Installs Java 17 (required by Flutter 3.47 / Gradle 9 / AGP).
+#  3. Installs Flutter 3.47.7 (the version the code was tested with:
+#     `flutter analyze` = No issues found, `flutter test` = 3/3).
+#  4. Runs flutter pub get -> flutter analyze -> flutter test ->
+#     flutter build apk --release (REAL Gradle, with daemon).
+#  5. Verifies the APK (aapt2 badging must show minSdk 24 / targetSdk 36,
+#     apksigner verify, zipalign check) and prints size + sha256.
+#  6. Uploads ONE artifact: app-release.apk (universal, all ABIs).
+
+name: Build KingCric APK
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.dart'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'android/**'
+      - '.github/workflows/build-apk.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    name: Build release APK (official Gradle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter 3.47.7
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Analyze (must be clean)
+        run: flutter analyze
+
+      - name: Test (must pass 3/3)
+        run: flutter test
+
+      - name: Build release APK (real Gradle)
+        run: flutter build apk --release
+
+      - name: Verify APK
+        run: |
+          set -euo pipefail
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          test -f "$APK"
+          ls -lh "$APK"
+          sha256sum "$APK"
+          # Badging must show the package + SDKs (fails the job if not).
+          "$ANDROID_HOME/build-tools/36.0.0/aapt2" dump badging "$APK" | tee /tmp/badging.txt
+          grep -q "name='com.kingcric.app'" /tmp/badging.txt
+          grep -q "minSdkVersion:'24'" /tmp/badging.txt
+          grep -q "targetSdkVersion:'36'" /tmp/badging.txt
+          grep -q "supports-any-density: 'true'" /tmp/badging.txt
+          # Signature + alignment.
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/zipalign" -c -v -P 16 4 "$APK"
+          # Native libs for every ABI (Flutter + app + dartjni).
+          python3 -c "
+          import zipfile
+          z = zipfile.ZipFile('$APK')
+          names = z.namelist()
+          assert z.testzip() is None, 'zip corrupt'
+          for abi in ('arm64-v8a', 'armeabi-v7a', 'x86_64'):
+              for lib in ('libflutter.so', 'libapp.so', 'libdartjni.so'):
+                  assert f'lib/{abi}/{lib}' in names, f'missing lib/{abi}/{lib}'
+          print('native libs OK for all ABIs')
+          "
+          echo "APK verification PASSED"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingcric-app-release-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
+          if-no-files-found: error
+          retention-days: 30
