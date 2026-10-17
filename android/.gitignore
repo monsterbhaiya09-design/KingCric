@@ -1,8 +1,12 @@
-gradle-wrapper.jar
+# NOTE (CI fix, 2026-10-17): gradlew / gradlew.bat / gradle-wrapper.jar
+# are INTENTIONALLY committed (NOT ignored). The Flutter template used
+# to ignore them, which meant a `git ls-files`-based upload left the
+# Gradle wrapper out of the GitHub repo. `flutter build apk` happens
+# to regenerate the wrapper, so that alone did not break the GitHub
+# build — but a self-contained repo (wrapper included) removes a whole
+# class of CI failure and matches what `flutter create` produces on disk.
 /.gradle
 /captures/
-/gradlew
-/gradlew.bat
 /local.properties
 GeneratedPluginRegistrant.java
 .cxx/
