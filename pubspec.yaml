@@ -1,7 +1,11 @@
 name: kingcric
 description: "KingCric - Har Ball, Har Stat, King Jaisa. Full cricket analytics: live scores, deep player stats, H2H, venue records, predictions."
 publish_to: "none"
-version: 1.0.0+1
+# versionCode bumped +1 -> +2 (2026-10-17): audit found versionCode 1 +
+# same debug cert + a stale partial install makes Android reject reinstall
+# as INSTALL_FAILED_UPDATE_INCOMPATIBLE -> generic "App not installed",
+# even when the new APK is valid. New APK must be versionCode 2.
+version: 1.0.0+2
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
