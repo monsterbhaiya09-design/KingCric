@@ -19,12 +19,22 @@ adding a provider never touches a screen.
 | 3 | **EntitySport** `rest.entitysport.com/v2` | Yes — `ENTITYSPORT_API_KEY` (`?token=`) | Free dev token: sample completed competitions only | Matches, live, info, competitions | **TERTIARY** — sample/ completed data |
 | 4 | **SportScore** `sportscore.com/api/widget/` | **No key** | ~10,000 req/24h/IP | Live scores, fixtures, standings, top scorers, player stats (scores only) | **KEYLESS BACKSTOP** — needs attribution (see §2) |
 | 5 | **TheSportsDB** `thesportsdb.com/api/v1/json/{key}/` | Test key `123` built in; own key via `SPORTSDB_API_KEY` | ~500/day reported (free registration) | Schedules/fixtures, results, team badges/logos, player bios, league lists, venues | **METADATA BACKSTOP** — not real-time |
+| 6 | **Cricsheet** `cricsheet.org` (open data, NOT an API) | **No key** — bundled sample asset + full `all_json.zip` download | No quota (download once, compute locally) | **REAL calculated deep stats:** career, vs-opponent, venue, league, bowler-vs-batter, dismissal history, recent form, H2H, partnerships, FOW — computed from ball-by-ball data | **DEEP-STATS SOURCE** — `fetchPlayer` only, tried FIRST (offline, zero quota). See CRICSHEET-DATA.md |
 
 **Fallback order:** CricAPI → EliteSport → EntitySport → SportScore →
 TheSportsDB → cache (last verified) → mock demo data (always works
 offline). If a provider fails, is capped, or is unconfigured, the next
 one is tried. No provider can crash the app: every provider returns
 null/[] on any error.
+
+**Player profiles are different:** `fetchPlayer` tries **Cricsheet
+first** (offline, zero quota). A Cricsheet-built profile has
+`source='cricsheet'` + `dataComplete=true` + `sourceMatches` = matches
+in the loaded dataset, and the profile screen labels it
+`Real • Cricsheet open data • N matches in dataset`. Provider basic
+profiles (`dataComplete=false`) and mock demo profiles are only used
+when Cricsheet has no data for that player. Demo is never presented
+as real.
 
 **Cross-check:** the orchestrator compares the primary result against
 any cached other-provider result for shared matches (id → runs/wkts).
@@ -104,6 +114,7 @@ set, the app builds in demo/backstop mode.
 | EntitySport `GET /matches?token=`, `/matches/{id}/info?token=`, `/competitions?token=` | same methods (fallback) | Same screens |
 | SportScore `GET /api/widget/cricket/matches` (+ live) | `fetchMatches()` (scores only) | Home — backstop scores |
 | TheSportsDB `livescore.php?s=Cricket`, `search_all_leagues.php?s=Cricket`, `lookupplayer.php` | `fetchMatches()` / `fetchSeries()` / `fetchPlayer()` (metadata) | Home / Leagues / Player (metadata) |
+| Cricsheet bundled sample / `all_json.zip` (open data, no HTTP) | `fetchPlayer()` (via `CricsheetService`, tried first) | Player Profile — REAL calculated career / vs-opponent / venue / matchup / dismissal / form |
 
 Response envelopes:
 - CricAPI: `{"status":"success","info":{"hitsToday":12,"hitsLimit":100,"hitsLeft":88},"data":[...]}`. `status:"failure"` + HTTP 400 = bad / exhausted key → fallback.
@@ -159,14 +170,16 @@ flutter run --dart-define=CRIC_API_KEY=YOUR_FREE_KEY
 - **Live ball-by-ball is 10-min cached**, not sub-second. No free tier
   supports faster polling (see §7). Paid tiers / push feeds would be
   needed for true real-time — out of scope for the ₹0 build.
-- **Player career / vs-opponent / venue / matchup stats in live mode**
-  come from the free providers' basic profiles only. NO free provider
-  in this set returns deep career / vs-opponent / venue / bowler-vs-
-  batter history. Those sections still use the curated dataset and
-  are flagged `dataComplete: false` in live mode — the app never
-  presents them as live-verified. Wiring a richer free source for
-  deep stats (if one is found and verified) goes behind the same
-  `CricketProvider` interface.
+- **Player career / vs-opponent / venue / matchup stats** now come
+  from **Cricsheet open data** (see CRICSHEET-DATA.md) — real stats
+  calculated from ball-by-ball deliveries, offline, zero quota.
+  CAVEAT: the bundled asset is a **4-match sample**, so those numbers
+  are real-over-the-sample, labelled with the dataset size, and are
+  NOT full careers. Full-career numbers need the full-dataset refresh
+  (download `all_json.zip`, replace the asset, rebuild — no code
+  change). When Cricsheet has no data for a player, the profile
+  falls back to provider basic profile / curated demo, flagged
+  `dataComplete: false` — never presented as live-verified.
 - **EliteSport base URL is UNVERIFIED** (see §1). Until it is confirmed
   against the dashboard/docs, that provider may silently return null.
   That is safe (fallback works) but means it may contribute nothing.
