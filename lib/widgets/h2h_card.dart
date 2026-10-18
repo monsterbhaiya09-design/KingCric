@@ -20,7 +20,13 @@ class H2HCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     // Clamp: winsA+winsB may exceed total in live data (draws/no-results).
+    // Draws / no-results = total minus both win counts (never negative).
+    final draws =
+        (total - winsA - winsB).clamp(0, total < 0 ? 0 : total);
     final frac = total == 0 ? 0.5 : (winsA / total).clamp(0.0, 1.0);
+    // Winner gets gold, loser gets secondary. Draw = both gold.
+    final aLeads = winsA > winsB;
+    final bLeads = winsB > winsA;
     return KingGradientCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -31,7 +37,7 @@ class H2HCard extends StatelessWidget {
                   size: 20, color: AppTheme.goldLight),
               const SizedBox(width: 8),
               const Expanded(
-                child: Text('Head to Head',
+                child: Text('Head-to-Head',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style:
@@ -52,8 +58,10 @@ class H2HCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w800)),
                     Text('$winsA wins',
-                        style: const TextStyle(
-                            color: AppTheme.goldLight,
+                        style: TextStyle(
+                            color: aLeads || !bLeads
+                                ? AppTheme.goldLight
+                                : AppTheme.textSecondary,
                             fontWeight: FontWeight.w900,
                             fontSize: 22)),
                   ],
@@ -81,8 +89,10 @@ class H2HCard extends StatelessWidget {
                         style: const TextStyle(fontWeight: FontWeight.w800)),
                     Text('$winsB wins',
                         textAlign: TextAlign.right,
-                        style: const TextStyle(
-                            color: AppTheme.textSecondary,
+                        style: TextStyle(
+                            color: bLeads || !aLeads
+                                ? AppTheme.goldLight
+                                : AppTheme.textSecondary,
                             fontWeight: FontWeight.w900,
                             fontSize: 22)),
                   ],
@@ -107,7 +117,10 @@ class H2HCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
-          Text('$teamA $winsA — $winsB $teamB • $total matches',
+          Text(
+              draws > 0
+                  ? '$teamA $winsA — $winsB $teamB • $total matches • $draws draw${draws == 1 ? '' : 's'} / no-result${draws == 1 ? '' : 's'}'
+                  : '$teamA $winsA — $winsB $teamB • $total matches',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: AppTheme.textSecondary)),
