@@ -1,12 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- REQUIRED: Gradle normally injects uses-sdk from build.gradle.kts
-         (minSdk 24 / targetSdk 36 per Flutter 3.47 defaults). The manual
-         Gradle-free pipeline (tools/build_apk_manual.sh) does NOT inject
-         it, so it must be declared here explicitly. Without it, aapt2
-         emits an APK with NO targetSdk (PackageManager treats it as 1),
-         and Android 14+ rejects install with "App isn't compatible with
-         your phone" (INSTALL_FAILED_DEPRECATED_SDK_VERSION). Do NOT remove. -->
-    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="36" />
+    <!-- SDK versions live in android/app/build.gradle.kts (minSdk 24 /
+         targetSdk 36) and Gradle injects them. Do NOT put a uses-sdk
+         element here: AGP 9.0+ fails the build with "Manifest merger
+         failed: The uses-sdk tag was detected" (this killed runs
+         39113688632 and 39115660438 — the Build step falsely showed
+         green because of a pipe masking flutter's exit code). -->
     <supports-screens
         android:smallScreens="true"
         android:normalScreens="true"
