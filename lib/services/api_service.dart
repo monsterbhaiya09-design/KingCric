@@ -332,11 +332,33 @@ class ApiService {
   static List<CricketMatch> mergeMatches(
       List<List<CricketMatch>> lists,
       {List<String>? providerNames}) {
-    int richness(CricketMatch m) =>
-        m.innings.length * 100 +
-        m.scores.length * 10 +
-        (m.squadA.length + m.squadB.length) +
-        (m.isEffectivelyLive ? 1 : 0);
+    int richness(CricketMatch m) {
+      // MAIN-CORE FIX: count only scores where play actually
+      // happened. Backstops emit a 0/0 placeholder row for the side
+      // yet to bat, and the old `scores.length` count let that
+      // placeholder outrank a real score from another feed — the
+      // placeholder copy then won the merge and took its
+      // non-CricAPI id with it, after which /cricketScore with
+      // that id failed and the match opened with no scorecard.
+      final meaningfulScores = m.scores
+          .where((s) =>
+              s.batted && (s.runs > 0 || s.wickets > 0 || s.overs > 0))
+          .length;
+      var score = m.innings.length * 100 +
+          meaningfulScores * 10 +
+          (m.squadA.length + m.squadB.length);
+      // Status breaks ties among bare list entries: a completed >
+      // live > upcoming copy of the same fixture wins, so a stale
+      // 'upcoming' label can never displace the live copy
+      // (live-as-upcoming). A full scorecard still dominates via
+      // the innings term above.
+      if (m.status == MatchStatus.completed) {
+        score += 10;
+      } else if (m.isEffectivelyLive) {
+        score += 5;
+      }
+      return score;
+    }
     // Pass 1: bucket by (baseKey, leagueKey). Same-provider entries
     // with different non-empty ids get an id-suffixed bucket so
     // they can never collapse each other.
