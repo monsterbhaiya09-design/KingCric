@@ -21,8 +21,10 @@ class _FavouritesScreenState extends State<FavouritesScreen> {
   Set<String> _favTeams = {};
   bool _notifications = true;
   // Cached futures (reference G5): never re-fire on every build.
-  late final Future<List<Player>> _playersFuture;
-  late final Future<List<CricketMatch>> _matchesFuture;
+  // NOT final: Retry reassigns them. `late final` + reassignment
+  // throws LateError, so a Retry tap after a load error crashed.
+  late Future<List<Player>> _playersFuture;
+  late Future<List<CricketMatch>> _matchesFuture;
 
   /// One-line meaning of each notification event (reference: every
   /// setting explains itself in one line).
