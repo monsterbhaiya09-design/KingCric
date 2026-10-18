@@ -4,6 +4,7 @@ import '../models/match.dart';
 import '../models/player.dart';
 import '../models/venue.dart';
 import '../utils/constants.dart';
+import 'cricsheet_service.dart';
 import 'mock_data_service.dart';
 import 'providers/cricapi_provider.dart';
 import 'providers/cricket_provider.dart';
@@ -26,6 +27,16 @@ import 'providers/thesportsdb_provider.dart';
 ///  4. SportScore — keyless backstop, scores only (+ attribution)
 ///  5. TheSportsDB — keyless metadata backstop (schedules, leagues)
 ///  6. Cache (last verified) -> Mock demo data (always works offline)
+///
+/// PLAYER DEEP STATS (fetchPlayer only): Cricsheet open ball-by-ball
+/// data is tried FIRST — it is offline, costs zero quota, and is the
+/// ONLY source in the stack that returns REAL calculated career /
+/// vs-opponent / venue / matchup stats (see cricsheet_service.dart).
+/// A Cricsheet-built profile has source='cricsheet' +
+/// dataComplete=true + sourceMatches = dataset size, and is labelled
+/// in the UI as real-but-sample-scoped. Provider basic profiles
+/// (dataComplete=false) and mock demo profiles are only used when
+/// Cricsheet has no data for that player. Never present demo as real.
 ///
 /// CROSS-CHECK: when the primary succeeds, the orchestrator does NOT
 /// burn quota re-fetching from every provider. It compares the
@@ -50,6 +61,9 @@ class _CacheEntry<T> {
 class ApiService {
   final MockDataService _mock = MockDataService();
   final List<CricketProvider> _providers;
+  final CricsheetService? _cricsheetInjected;
+  final bool _loadCricsheetSample;
+  Future<CricsheetService>? _cricsheetFuture;
 
   _CacheEntry<List<CricketMatch>>? _matchesCache;
   final Map<String, _CacheEntry<CricketMatch>> _detailCache = {};
@@ -59,8 +73,14 @@ class ApiService {
   /// Last provider that successfully answered (debug / UI label).
   String lastSource = 'mock';
 
-  ApiService({List<CricketProvider>? providers, http.Client? client})
-      : _providers = providers ??
+  ApiService(
+      {List<CricketProvider>? providers,
+      http.Client? client,
+      CricsheetService? cricsheet,
+      bool loadCricsheetSample = true})
+      : _cricsheetInjected = cricsheet,
+        _loadCricsheetSample = loadCricsheetSample,
+        _providers = providers ??
             [
               CricApiProvider(client: client),
               EliteSportProvider(client: client),
@@ -88,6 +108,28 @@ class ApiService {
 
   /// True when the primary (CricAPI) key is present — full scorecards.
   bool get hasPrimaryKey => AppConstants.hasApiKey;
+
+  /// Lazily-loaded Cricsheet service (bundled sample, parsed once).
+  /// Never throws: load failure -> empty service (no Cricsheet data).
+  Future<CricsheetService> _cricsheet() {
+    if (_cricsheetInjected != null) {
+      return Future.value(_cricsheetInjected);
+    }
+    _cricsheetFuture ??= _loadCricsheetSample
+        ? CricsheetService.loadBundled()
+        : Future.value(CricsheetService.empty());
+    return _cricsheetFuture!;
+  }
+
+  /// How many Cricsheet matches back the player profiles (0 = sample
+  /// failed to load). For the UI source label. Never throws.
+  Future<int> get cricsheetMatchCount async {
+    try {
+      return (await _cricsheet()).matchCount;
+    } catch (_) {
+      return 0;
+    }
+  }
 
   int get cacheEntryCount =>
       (_matchesCache == null ? 0 : 1) +
@@ -283,6 +325,20 @@ class ApiService {
       final cached = _playerCache[playerId];
       if (cached != null && cached.fresh) return cached.value;
     }
+    // 0. Cricsheet FIRST (offline, zero quota): real calculated stats.
+    try {
+      final cs = await _cricsheet();
+      final real = cs.playerById(playerId);
+      if (real != null) {
+        lastSource = 'cricsheet';
+        _playerCache[playerId] = _CacheEntry<Player>(
+          real,
+          DateTime.now().add(AppConstants.completedCacheTtl),
+          'cricsheet',
+        );
+        return real;
+      }
+    } catch (_) {}
     for (final p in _providers) {
       if (!p.isConfigured) continue;
       try {
