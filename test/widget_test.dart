@@ -39,6 +39,8 @@ class _FakeProvider implements CricketProvider {
   @override
   Future<List<CricketMatch>?> fetchMatches() async => matches;
   @override
+  Future<List<CricketMatch>?> fetchUpcoming() async => null;
+  @override
   Future<CricketMatch?> fetchScorecard(String matchId) async => null;
   @override
   Future<List<Map<String, dynamic>>?> fetchSeries() async => null;
