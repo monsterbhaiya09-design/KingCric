@@ -273,6 +273,17 @@ class Player {
   BattingStats battingOverall() => battingByFormat.values
       .fold(const BattingStats(), (a, b) => a + b);
 
+  /// V2: total wickets across formats (sum, best ignored).
+  BowlingStats bowlingOverall() {
+    var wkts = 0;
+    var matches = 0;
+    for (final s in bowlingByFormat.values) {
+      wkts += s.wickets;
+      matches += s.matches;
+    }
+    return BowlingStats(wickets: wkts, matches: matches);
+  }
+
   BattingStats battingInFormat(String format) =>
       battingByFormat[format] ?? const BattingStats();
 
