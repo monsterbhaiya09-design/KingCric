@@ -39,11 +39,12 @@ class PredictionEngine {
     final vsOpp = player.battingVs(opponent);
     final venueStats = player.battingByVenue[venueId];
 
-    // No data at all (no career, no form, no matchup) = no prediction.
-    // The UI shows "Not enough data" instead of a fake 50.
-    final hasAnySignal = career.matches > 0 ||
-        player.recentForm.isNotEmpty ||
-        player.matchups.isNotEmpty;
+    // No signal at all = no prediction. A bowling-only player has
+    // no batting career but IS a signal (bowling matches, vs-opponent
+    // blocks, venue blocks all count). Never a fake ~50: with no
+    // signal the returned score is 0 and hasData is false, so no
+    // consumer can accidentally display a mid-range number.
+    final hasAnySignal = _hasAnySignal(player, career);
 
     final formScore = _safe(_formScore(player));
     final oppScore = _safe(_relativeScore(
@@ -59,11 +60,15 @@ class PredictionEngine {
     final matchupScore = _safe(_matchupScore(player));
     final double pitchScore = _safe(pitchBattingFriendliness, 55).clamp(0, 100).toDouble();
 
-    final total = _safe(formScore * wForm +
+    final rawTotal = formScore * wForm +
         oppScore * wOpponent +
         venueScore * wVenue +
         matchupScore * wMatchup +
-        pitchScore * wPitch);
+        pitchScore * wPitch;
+    // No signal -> score 0, never a fake ~50. Otherwise clamp 0-100.
+    final total = hasAnySignal
+        ? _safe(rawTotal).clamp(0, 100).toDouble()
+        : 0.0;
 
     final en = hasAnySignal
         ? _explainEn(
@@ -102,6 +107,26 @@ class PredictionEngine {
       explanationHi: hi,
       hasData: hasAnySignal,
     );
+  }
+
+  /// Any real signal: batting career, bowling career, recent form,
+  /// matchups, or a vs-opponent / venue block with actual matches.
+  /// Empty maps and zero-match blocks are NOT signal.
+  static bool _hasAnySignal(Player player, BattingStats career) {
+    if (career.matches > 0) return true;
+    if (player.bowlingOverall().matches > 0) return true;
+    if (player.recentForm.isNotEmpty) return true;
+    if (player.matchups.isNotEmpty) return true;
+    for (final s in player.battingVsOpponent.values) {
+      if (s.matches > 0) return true;
+    }
+    for (final s in player.bowlingVsOpponent.values) {
+      if (s.matches > 0) return true;
+    }
+    for (final s in player.battingByVenue.values) {
+      if (s.matches > 0) return true;
+    }
+    return false;
   }
 
   static double _formScore(Player p) {
