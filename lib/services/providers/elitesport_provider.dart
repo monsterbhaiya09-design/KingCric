@@ -72,10 +72,10 @@ class EliteSportProvider implements CricketProvider {
   }
 
   CricketMatch? _matchFromGeneric(Map<String, dynamic> m) {
-    final home = ProviderParsing.toStr(
-        m['home_team'] ?? m['homeTeam'] ?? m['teamA'] ?? m['teama']);
-    final away = ProviderParsing.toStr(
-        m['away_team'] ?? m['awayTeam'] ?? m['teamB'] ?? m['teamb']);
+    final home = ProviderParsing.titleCaseTeam(ProviderParsing.toStr(
+        m['home_team'] ?? m['homeTeam'] ?? m['teamA'] ?? m['teama']));
+    final away = ProviderParsing.titleCaseTeam(ProviderParsing.toStr(
+        m['away_team'] ?? m['awayTeam'] ?? m['teamB'] ?? m['teamb']));
     if (home.isEmpty || away.isEmpty) return null;
     final statusRaw =
         ProviderParsing.toStr(m['status'] ?? m['match_status'] ?? '');
@@ -199,6 +199,7 @@ class EliteSportProvider implements CricketProvider {
       bowlingStyle:
           ProviderParsing.toStr(data['bowling_style'] ?? data['bowlingStyle'] ?? ''),
       dataComplete: false,
+      source: 'elitesport',
       lastUpdated: DateTime.now(),
     );
   }
