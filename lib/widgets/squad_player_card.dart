@@ -68,7 +68,9 @@ class SquadPlayerCard extends StatelessWidget {
   String _sourceLabel() {
     if (_isScorecardOnly) return 'Scorecard only';
     if (player.source == 'cricsheet') return 'Real • Cricsheet';
-    if (player.source == 'demo' || !player.dataComplete) return 'Demo';
+    // Provenance, not completeness: a provider partial profile is
+    // Partial, never "Demo" (demo = curated sample only).
+    if (player.source == 'demo') return 'Demo';
     return 'Partial';
   }
 
