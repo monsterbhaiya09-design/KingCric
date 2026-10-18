@@ -47,6 +47,12 @@ class _FakeProvider implements CricketProvider {
   @override
   Future<Player?> fetchPlayer(String playerId) async => null;
   @override
+  Future<String?> resolvePlayerId(String name) async => null;
+  @override
+  int? get serverHitsLeft => null;
+  @override
+  bool get quotaExhausted => false;
+  @override
   Future<bool> testKey() async => true;
 }
 
