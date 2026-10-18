@@ -17,10 +17,13 @@ android {
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.kingcric.app"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
-        targetSdk = flutter.targetSdkVersion
+        // SDK versions are set EXPLICITLY here (not via flutter defaults and
+        // NOT via <uses-sdk> in AndroidManifest.xml — AGP 9.0+ fails the
+        // build if <uses-sdk> appears in the manifest). Gradle injects
+        // these into the merged manifest, so aapt2 badging shows
+        // minSdk 24 / targetSdk 36.
+        minSdk = 24
+        targetSdk = 36
         // Uses the version code from pubspec.yaml. When using split APKs, 1000 * ABI_VERSION
         // is added automatically by Flutter. (https://developer.android.com/studio/build/configure-apk-splits#configure-APK-versions)
         // You can force using the value of versionCode by specifying the `-P force-version-code-ignoring-abi=true`
