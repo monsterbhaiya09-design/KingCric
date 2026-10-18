@@ -159,7 +159,16 @@ jobs:
         run: flutter test
 
       - name: Build release APK (real Gradle)
-        run: flutter build apk --release 2>&1 | tee build-apk.log
+        # 2026-10-18 ROOT-CAUSE FIX: the old step was
+        # `flutter build apk --release 2>&1 | tee build-apk.log`, whose
+        # exit code was tee's (0) — so the step showed GREEN even when
+        # Gradle failed (runs 39113688632 + 39115660438 both "passed"
+        # Build while build-apk.log said BUILD FAILED and no APK
+        # existed). Capture flutter's own exit code and exit with it.
+        run: |
+          flutter build apk --release >build-apk.log 2>&1 || BUILD_STATUS=$?
+          cat build-apk.log
+          exit "${BUILD_STATUS:-0}"
 
       - name: Show build tail on failure
         if: failure()
@@ -264,5 +273,7 @@ jobs:
         with:
           name: kingcric-app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: warn
+          # error (not warn): a missing APK must FAIL loudly. warn let
+          # run 39115660438 show Upload as green with no APK artifact.
+          if-no-files-found: error
           retention-days: 30
