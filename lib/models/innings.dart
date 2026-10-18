@@ -53,6 +53,8 @@ class BowlingEntry {
   final int runsConceded;
   final int wickets;
   final double economy;
+  final int wides;
+  final int noBalls;
 
   const BowlingEntry({
     required this.playerId,
@@ -62,6 +64,8 @@ class BowlingEntry {
     this.runsConceded = 0,
     this.wickets = 0,
     this.economy = 0,
+    this.wides = 0,
+    this.noBalls = 0,
   });
 
   factory BowlingEntry.fromJson(Map<String, dynamic> j) => BowlingEntry(
@@ -72,6 +76,8 @@ class BowlingEntry {
         runsConceded: (j['runsConceded'] as num?)?.toInt() ?? 0,
         wickets: (j['wickets'] as num?)?.toInt() ?? 0,
         economy: (j['economy'] as num?)?.toDouble() ?? 0,
+        wides: (j['wides'] as num?)?.toInt() ?? 0,
+        noBalls: (j['noBalls'] as num?)?.toInt() ?? 0,
       );
 
   Map<String, dynamic> toJson() => {
@@ -82,6 +88,8 @@ class BowlingEntry {
         'runsConceded': runsConceded,
         'wickets': wickets,
         'economy': economy,
+        'wides': wides,
+        'noBalls': noBalls,
       };
 }
 
@@ -94,6 +102,13 @@ class Innings {
   final List<BattingEntry> batting;
   final List<BowlingEntry> bowling;
   final List<String> fallOfWickets;
+  // V2 full scoreboard fields — all optional with defaults so old
+  // JSON / tests keep working.
+  final int extrasRuns;
+  final String extrasText; // e.g. "Wd 3, Nb 1, B 1 (5)"
+  final List<String> yetToBat;
+  final List<String> partnerships; // e.g. "Virat + Surya 68 (42 balls)"
+  final String didNotBatNote;
 
   const Innings({
     required this.team,
@@ -104,6 +119,11 @@ class Innings {
     this.batting = const [],
     this.bowling = const [],
     this.fallOfWickets = const [],
+    this.extrasRuns = 0,
+    this.extrasText = '',
+    this.yetToBat = const [],
+    this.partnerships = const [],
+    this.didNotBatNote = '',
   });
 
   factory Innings.fromJson(Map<String, dynamic> j) => Innings(
@@ -122,6 +142,12 @@ class Innings {
             .toList(),
         fallOfWickets:
             ((j['fallOfWickets'] as List?) ?? []).map((e) => '$e').toList(),
+        extrasRuns: (j['extrasRuns'] as num?)?.toInt() ?? 0,
+        extrasText: j['extrasText'] as String? ?? '',
+        yetToBat: ((j['yetToBat'] as List?) ?? []).map((e) => '$e').toList(),
+        partnerships:
+            ((j['partnerships'] as List?) ?? []).map((e) => '$e').toList(),
+        didNotBatNote: j['didNotBatNote'] as String? ?? '',
       );
 
   Map<String, dynamic> toJson() => {
@@ -133,5 +159,10 @@ class Innings {
         'batting': batting.map((e) => e.toJson()).toList(),
         'bowling': bowling.map((e) => e.toJson()).toList(),
         'fallOfWickets': fallOfWickets,
+        'extrasRuns': extrasRuns,
+        'extrasText': extrasText,
+        'yetToBat': yetToBat,
+        'partnerships': partnerships,
+        'didNotBatNote': didNotBatNote,
       };
 }
