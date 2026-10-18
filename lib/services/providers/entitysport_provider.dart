@@ -101,7 +101,8 @@ class EntitySportProvider implements CricketProvider {
     away = ProviderParsing.titleCaseTeam(away);
     final statusRaw = ProviderParsing.toStr(
         m['status_str'] ?? m['status'] ?? m['match_status'] ?? '');
-    final status = ProviderParsing.statusFromText(statusRaw);
+    // SQUAD D: status resolved AFTER scores (see EliteSport) with
+    // the REAL hasScores — never statusFromText's hasScores=false.
     // Scores: nested {teama:{scores...}, teamb:{...}} or flat.
     int runsOf(Map<String, dynamic>? team) {
       if (team == null) return 0;
@@ -125,6 +126,17 @@ class EntitySportProvider implements CricketProvider {
       return ProviderParsing.toInt(team['wickets']);
     }
 
+    final homeRuns = runsOf(teama);
+    final homeWkts = wktsOf(teama);
+    final awayRuns = runsOf(teamb);
+    final awayWkts = wktsOf(teamb);
+    final status = ProviderParsing.resolveStatus(
+      raw: statusRaw,
+      hasScores: ProviderParsing.scoresPresent(
+              runs: homeRuns, wickets: homeWkts) ||
+          ProviderParsing.scoresPresent(
+              runs: awayRuns, wickets: awayWkts),
+    );
     return CricketMatch(
       id: ProviderParsing.toStr(m['match_id'] ?? m['id'] ?? ''),
       teamA: home,
@@ -166,9 +178,12 @@ class EntitySportProvider implements CricketProvider {
   Future<List<CricketMatch>?> fetchMatches() async {
     final body = await _getJson(_uri('/matches'));
     if (body == null) return null;
-    final parsed =
-        _items(body).map(_matchFromGeneric).whereType<CricketMatch>().toList();
-    debugPrint('KingCric [EntitySport] fetchMatches: kept=${parsed.length}');
+    final received = _items(body);
+    final parsed = received
+        .map(_matchFromGeneric)
+        .whereType<CricketMatch>()
+        .toList();
+    debugPrint('KingCric [EntitySport] fetchMatches: received=${received.length} dropped=${received.length - parsed.length} kept=${parsed.length}');
     return parsed.isEmpty ? null : parsed;
   }
 
