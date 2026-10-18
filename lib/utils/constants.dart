@@ -107,9 +107,13 @@ class AppConstants {
     'U19',
   ];
 
-  /// AdMob placeholder. Real ad unit ids go here ONLY after creating a
-  /// free AdMob account. Until then the app shows a clearly-labelled
-  /// placeholder banner so the layout is testable without ads.
-  static const String admobBannerAdUnitId = '';
+  /// AdMob banner unit id, via --dart-define=ADMOB_BANNER_UNIT_ID=....
+  /// Empty (default) = NO ads configured. The UI must render NOTHING
+  /// in that case — never a visible "Ad placeholder" box in release
+  /// (V3 bug fix). The old placeholder-banner behaviour is gone.
+  static const String admobBannerAdUnitId = String.fromEnvironment(
+    'ADMOB_BANNER_UNIT_ID',
+    defaultValue: '',
+  );
   static bool get hasAds => admobBannerAdUnitId.isNotEmpty;
 }
