@@ -165,6 +165,19 @@ class EliteSportProvider implements CricketProvider {
   }
 
   @override
+  Future<List<CricketMatch>?> fetchUpcoming() async {
+    final fix = await _getJson('/fixtures');
+    if (fix == null) return null;
+    final parsed =
+        _list(fix).map(_matchFromGeneric).whereType<CricketMatch>().toList();
+    final upcoming = parsed
+        .where((m) =>
+            m.status == MatchStatus.upcoming && !m.isEffectivelyLive)
+        .toList();
+    return upcoming.isEmpty ? null : upcoming;
+  }
+
+  @override
   Future<CricketMatch?> fetchScorecard(String matchId) async {
     // Full innings parsing needs the provider's exact scorecard shape;
     // until it is verified against a live response, return the match
