@@ -96,6 +96,11 @@ class AutoUpdateService {
     _timer = null;
   }
 
+  /// True while the periodic poller is armed. Testable; also lets
+  /// callers avoid double-starting (start() already stops first,
+  /// so this is a read-only signal, not a lock).
+  bool get isRunning => _timer != null;
+
   /// One poll cycle. Public so tests / manual refresh can call it.
   /// NEVER throws: all failures are swallowed so a flaky network /
   /// bad payload can never kill the app process.
@@ -113,7 +118,14 @@ class AutoUpdateService {
   }
 
   Future<void> _tickInner() async {
-    final matches = await _api.fetchMatches();
+    // forceRefresh: true is REQUIRED here. A plain fetchMatches()
+    // returns the 10-min TTL cache, which makes every poll inside
+    // the TTL window return the SAME list — finish transitions
+    // would never be seen and the poller would be a no-op (the
+    // same bug Home had with Refresh). The tick interval already
+    // equals the TTL (10 min), so this costs one call per tick,
+    // exactly the quota the cache was designed around.
+    final matches = await _api.fetchMatches(forceRefresh: true);
     lastPoll = DateTime.now();
     for (final fn in List.of(_matchesListeners)) {
       try {
@@ -121,11 +133,16 @@ class AutoUpdateService {
       } catch (_) {}
     }
     for (final m in matches) {
+      // Effective status: a match whose status field lags but whose
+      // result already says "won by ..." IS completed (Squad E
+      // status truth). Comparing raw status would miss that finish.
+      final effective =
+          m.isCompleted ? MatchStatus.completed : m.status;
       final prev = _lastKnown[m.id];
-      _lastKnown[m.id] = m.status;
+      _lastKnown[m.id] = effective;
       if (prev == null) continue; // first sighting: no transition yet
       if (prev != MatchStatus.completed &&
-          m.status == MatchStatus.completed) {
+          effective == MatchStatus.completed) {
         // Match just finished: fetch the FINAL scorecard fresh
         // (forceRefresh: a cached live snapshot is stale by design).
         final detail = await _api.fetchMatchDetail(m.id,
