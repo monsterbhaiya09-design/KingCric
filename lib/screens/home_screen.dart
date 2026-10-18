@@ -245,7 +245,15 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(height: 10),
-          if (!_api.isLive)
+          // FIX-7: DISTINCT banners — never silent degrade.
+          // (a) No key configured at all -> demo mode by
+          // construction. (b) Server-side quota exhausted ->
+          // last verified data + explicit quota message. (c) Last
+          // fetch fell back to demo/stale (all providers down) ->
+          // demo banner REGARDLESS of key presence (the old code
+          // only showed it when lastSource=='mock' AND isLive, and
+          // the warm-cache path never set lastSource at all).
+          if (_api.quotaState == QuotaState.keyMissing)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(
@@ -260,11 +268,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 12)),
             ),
-          // Quota / all-providers-down banner: a key is configured
-          // but the last fetch fell back to demo. Never silently
-          // present demo data as live (reported bug: "live" match
-          // with no data was actually demo).
-          if (_api.isLive && _api.lastFetchWasMock && !_loading)
+          if (_api.quotaState == QuotaState.quotaExhausted && !_loading)
             Container(
               width: double.infinity,
               padding: const EdgeInsets.symmetric(
@@ -275,8 +279,29 @@ class _HomeScreenState extends State<HomeScreen> {
                   border: Border.all(
                       color: AppTheme.amber.withValues(alpha: 0.4))),
               child: const Text(
-                  'Live data unavailable right now — showing demo data. '
-                  'Daily API quota may be exhausted. Pull to refresh later.',
+                  'Daily API quota exhausted (server reported 0 hits '
+                  'left) — showing last verified data. Live data '
+                  'resumes when the daily quota resets. Pull to '
+                  'refresh later.',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12)),
+            ),
+          if (_api.quotaState != QuotaState.quotaExhausted &&
+              _api.lastFetchWasMock &&
+              !_loading)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                  color: AppTheme.amber.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: AppTheme.amber.withValues(alpha: 0.4))),
+              child: const Text(
+                  'Live data unavailable right now — showing demo / '
+                  'last verified data. Pull to refresh later.',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 12)),
