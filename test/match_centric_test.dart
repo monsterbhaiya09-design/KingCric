@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import 'package:kingcric/models/match.dart';
 import 'package:kingcric/models/player.dart';
 import 'package:kingcric/screens/match_detail_screen.dart';
+import 'package:kingcric/services/cricsheet_service.dart';
 import 'package:kingcric/services/mock_data_service.dart';
 import 'package:kingcric/utils/strings.dart';
 import 'package:kingcric/widgets/squad_player_card.dart';
@@ -14,6 +15,16 @@ Widget _wrap(Widget child) => ChangeNotifierProvider<LanguageProvider>(
     );
 
 void main() {
+  // MERGE-LEAD: warm the parse-once Cricsheet cache ONCE in setUpAll
+  // (real zone, before any test's fake-async starts). Do NOT warm it
+  // with tester.runAsync inside a test: runAsync deadlocks when a
+  // previous test pumped MatchDetailScreen, and the Squad / Venue
+  // tab's asset-load future then never completes. setUpAll warm-up
+  // makes every test await an already-completed future.
+  setUpAll(() async {
+    await CricsheetService.loadBundled();
+  });
+
   final players = MockDataService().players();
   final virat = players.firstWhere((p) => p.id == 'p-virat');
 
@@ -118,10 +129,13 @@ void main() {
       id: 'm-squad',
       teamA: 'India',
       teamB: 'Pakistan',
+      format: 'ODI',
       startTime: DateTime(2026, 10, 19, 17, 30),
       status: MatchStatus.upcoming,
       league: 'International',
-      // No squadA / squadB ids — fallback must use team filter.
+      // No squadA / squadB ids — squads must come from Cricsheet.
+      // ODI format: Kohli plays ODIs (he retired from T20Is), so a
+      // format-aware Cricsheet squad includes him.
     );
     // Tall viewport so both squad sections build without scrolling
     // (scrollUntilVisible is ambiguous with TabBarView + ListViews).
@@ -131,14 +145,34 @@ void main() {
     tester.view.physicalSize = const Size(800, 4000);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetPhysicalSize);
+    // Cricsheet cache is warmed once in setUpAll (see top of file)
+    // — no per-test runAsync warm-up (it deadlocks after a previous
+    // test pumped this screen).
     await tester.pumpWidget(_wrap(MatchDetailScreen(match: match)));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Squad'));
     await tester.pumpAndSettle();
-    // Team-filter fallback label on both sections.
-    expect(find.textContaining('from available player data'), findsNWidgets(2));
+    // Cricsheet-first squad label on the visible (India) section.
+    // The ListView lazily builds only what fits the viewport, so
+    // the Pakistan section is built only after scrolling to it —
+    // an exact "2 labels" count would fail even when both sections
+    // are Cricsheet-sourced. The unit test in
+    // cricsheet_wiring_test.dart proves both squads resolve from
+    // Cricsheet; here we prove the tab renders them (India first,
+    // then Pakistan after scrolling) and the old mock team-filter
+    // label appears NOWHERE for teams Cricsheet covers.
+    expect(find.textContaining('calculated from ball-by-ball'),
+        findsWidgets);
+    expect(find.textContaining('from available player data'), findsNothing);
     expect(find.text('Virat Kohli'), findsOneWidget);
+    // Drag the Squad ListView down to the Pakistan section. Do NOT
+    // use scrollUntilVisible here: it evaluates the finder
+    // mid-scroll, when the ListView transiently holds two copies
+    // of the target card, and throws "Too many elements".
+    await tester.drag(find.byType(ListView).first, const Offset(0, -6000));
+    await tester.pumpAndSettle();
     expect(find.text('Babar Azam'), findsOneWidget);
+    expect(find.textContaining('from available player data'), findsNothing);
   });
 
   testWidgets('Match-centric: Venue & H2H tab shows venue + H2H + matchups',
@@ -150,6 +184,9 @@ void main() {
     tester.view.physicalSize = const Size(800, 4000);
     addTearDown(tester.view.resetDevicePixelRatio);
     addTearDown(tester.view.resetPhysicalSize);
+    // Cricsheet cache is warmed once in setUpAll (see top of file)
+    // — no per-test runAsync warm-up (it deadlocks after a previous
+    // test pumped this screen).
     await tester.pumpWidget(_wrap(MatchDetailScreen(match: match)));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Venue & H2H'));
