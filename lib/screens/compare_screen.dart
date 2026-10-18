@@ -404,12 +404,20 @@ class _CompareScreenState extends State<CompareScreen> {
                   textAlign: TextAlign.center,
                   style: const TextStyle(fontWeight: FontWeight.w800)),
               const SizedBox(height: 2),
-              Text('${player.role} • ${player.team}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(
-                      color: AppTheme.textSecondary, fontSize: 11)),
+              // Only non-empty identity parts, joined — never a
+              // dangling " • " when role/team is missing.
+              Builder(builder: (_) {
+                final parts = [player.role, player.team]
+                    .where((s) => s.trim().isNotEmpty)
+                    .toList();
+                if (parts.isEmpty) return const SizedBox.shrink();
+                return Text(parts.join(' • '),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 11));
+              }),
               const SizedBox(height: 2),
               const Text('Tap for profile',
                   maxLines: 1,
