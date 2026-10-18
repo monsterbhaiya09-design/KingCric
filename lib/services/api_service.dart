@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/match.dart';
@@ -72,6 +74,46 @@ class ApiService {
 
   /// Last provider that successfully answered (debug / UI label).
   String lastSource = 'mock';
+
+  // ---- Smooth updates (stale-while-revalidate, dedup, freshness) ----
+  // See smooth_update.dart for the full design. These fields let
+  // screens show "Last updated HH:MM" from the service's own clock
+  // instead of inventing a timestamp per screen.
+  final List<void Function(List<CricketMatch>)> _matchesListeners = [];
+  DateTime? lastMatchesUpdated;
+  DateTime? lastDetailUpdated;
+  DateTime? lastSeriesUpdated;
+  DateTime? lastPlayerUpdated;
+
+  /// Subscribe to fresh match lists (SWR background refresh +
+  /// AutoUpdateService ticks). Listeners get the NEW list; they must
+  /// never throw (a listener crash must not break the fetch path).
+  void addMatchesListener(void Function(List<CricketMatch>) fn) =>
+      _matchesListeners.add(fn);
+  void removeMatchesListener(void Function(List<CricketMatch>) fn) =>
+      _matchesListeners.remove(fn);
+
+  void _notifyMatchesListeners(List<CricketMatch> fresh) {
+    for (final fn in List.of(_matchesListeners)) {
+      try {
+        fn(fresh);
+      } catch (_) {}
+    }
+  }
+
+  /// TTL for one match: completed data never changes (60 min cache,
+  /// effectively "never re-fetch"), live/upcoming use the 10-min
+  /// live TTL. Re-fetching a finished scorecard is pure quota waste.
+  static Duration ttlForMatch(CricketMatch m) =>
+      m.status == MatchStatus.completed
+          ? AppConstants.completedCacheTtl
+          : AppConstants.liveCacheTtl;
+
+  /// In-flight deduplication: concurrent callers (pull-to-refresh +
+  /// auto-update tick + screen rebuild) share ONE network request
+  /// instead of firing duplicates that burn quota and flicker the UI.
+  Future<List<CricketMatch>>? _matchesInFlight;
+  final Map<String, Future<CricketMatch?>> _scorecardInFlight = {};
 
   ApiService(
       {List<CricketProvider>? providers,
@@ -204,6 +246,19 @@ class ApiService {
         _matchesCache!.fresh) {
       return _matchesCache!.value;
     }
+    // Share one in-flight request across concurrent callers.
+    final inFlight = _matchesInFlight;
+    if (!forceRefresh && inFlight != null) return inFlight;
+    final future = _fetchMatchesUncached();
+    _matchesInFlight = future;
+    try {
+      return await future;
+    } finally {
+      if (identical(_matchesInFlight, future)) _matchesInFlight = null;
+    }
+  }
+
+  Future<List<CricketMatch>> _fetchMatchesUncached() async {
     for (final p in _providers) {
       if (!p.isConfigured) continue;
       try {
@@ -215,11 +270,13 @@ class ApiService {
             crossCheckMatches(result, _matchesCache!.value);
           }
           lastSource = p.name;
+          lastMatchesUpdated = DateTime.now();
           _matchesCache = _CacheEntry<List<CricketMatch>>(
             result,
             DateTime.now().add(AppConstants.liveCacheTtl),
             p.name,
           );
+          _notifyMatchesListeners(result);
           return result;
         }
       } catch (_) {
@@ -229,6 +286,27 @@ class ApiService {
     if (_matchesCache != null) return _matchesCache!.value;
     lastSource = 'mock';
     return _mock.matches();
+  }
+
+  /// Stale-while-revalidate: returns the cached list IMMEDIATELY
+  /// (never blank), then refreshes in the background and calls
+  /// [onUpdated] with the fresh list. If there is no cache, behaves
+  /// like a normal fetch. Screens show the old list + a small
+  /// "refreshing" indicator while the background fetch runs — no
+  /// full-screen spinner, no flicker.
+  Future<List<CricketMatch>> refreshMatchesInBackground(
+      {void Function(List<CricketMatch>)? onUpdated}) async {
+    final cached = _matchesCache;
+    if (cached != null) {
+      // Fire-and-forget: errors keep the cached data.
+      unawaited(fetchMatches(forceRefresh: true).then((fresh) {
+        onUpdated?.call(fresh);
+      }).catchError((_) {}));
+      return cached.value;
+    }
+    final fresh = await fetchMatches(forceRefresh: true);
+    onUpdated?.call(fresh);
+    return fresh;
   }
 
   Future<CricketMatch?> fetchMatchDetail(String matchId,
@@ -269,7 +347,36 @@ class ApiService {
     if (!forceRefresh) {
       final cached = _detailCache[matchId];
       if (cached != null && cached.fresh) return cached.value;
+      final inFlight = _scorecardInFlight[matchId];
+      if (inFlight != null) return inFlight;
     }
+    // Cache the fetched scorecard (completed = 60 min, live = 10 min)
+    // so repeated opens of the same match do NOT burn quota, and
+    // concurrent callers share one request.
+    final future = _fetchScorecardUncached(matchId);
+    _scorecardInFlight[matchId] = future;
+    try {
+      final result = await future;
+      if (result != null) {
+        lastDetailUpdated = DateTime.now();
+        final ttl = result.status == MatchStatus.completed
+            ? AppConstants.completedCacheTtl
+            : AppConstants.liveCacheTtl;
+        _detailCache[matchId] = _CacheEntry<CricketMatch>(
+          result,
+          DateTime.now().add(ttl),
+          lastSource,
+        );
+      }
+      return result;
+    } finally {
+      if (identical(_scorecardInFlight[matchId], future)) {
+        _scorecardInFlight.remove(matchId);
+      }
+    }
+  }
+
+  Future<CricketMatch?> _fetchScorecardUncached(String matchId) async {
     for (final p in _providers) {
       if (!p.isConfigured) continue;
       try {
@@ -298,6 +405,7 @@ class ApiService {
         final result = await p.fetchSeries();
         if (result != null && result.isNotEmpty) {
           lastSource = p.name;
+          lastSeriesUpdated = DateTime.now();
           _seriesCache = _CacheEntry<List<Map<String, dynamic>>>(
             result,
             DateTime.now().add(AppConstants.completedCacheTtl),
@@ -331,6 +439,7 @@ class ApiService {
       final real = cs.playerById(playerId);
       if (real != null) {
         lastSource = 'cricsheet';
+        lastPlayerUpdated = DateTime.now();
         _playerCache[playerId] = _CacheEntry<Player>(
           real,
           DateTime.now().add(AppConstants.completedCacheTtl),
@@ -345,6 +454,7 @@ class ApiService {
         final result = await p.fetchPlayer(playerId);
         if (result != null) {
           lastSource = p.name;
+          lastPlayerUpdated = DateTime.now();
           _playerCache[playerId] = _CacheEntry<Player>(
             result,
             DateTime.now().add(AppConstants.completedCacheTtl),
