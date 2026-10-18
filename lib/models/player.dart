@@ -249,6 +249,15 @@ class Player {
   final bool dataComplete;
   final DateTime? lastUpdated;
 
+  /// Where this profile's stats were calculated from.
+  /// '' = curated demo / provider basic profile (labelled as such).
+  /// 'cricsheet' = REAL stats calculated from Cricsheet open
+  /// ball-by-ball data (see CricsheetService). [sourceMatches] is how
+  /// many matches in the loaded dataset back the numbers — never
+  /// present sample-scope stats as a full career.
+  final String source;
+  final int sourceMatches;
+
   const Player({
     required this.id,
     required this.name,
@@ -268,6 +277,8 @@ class Player {
     this.dismissalHistory = const [],
     this.dataComplete = false,
     this.lastUpdated,
+    this.source = '',
+    this.sourceMatches = 0,
   });
 
   BattingStats battingOverall() => battingByFormat.values
@@ -329,6 +340,8 @@ class Player {
       lastUpdated: j['lastUpdated'] == null
           ? null
           : DateTime.tryParse(j['lastUpdated'] as String),
+      source: j['source'] as String? ?? '',
+      sourceMatches: (j['sourceMatches'] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -357,6 +370,8 @@ class Player {
         'dismissalHistory': dismissalHistory,
         'dataComplete': dataComplete,
         'lastUpdated': lastUpdated?.toIso8601String(),
+        'source': source,
+        'sourceMatches': sourceMatches,
       };
 
   Player copyWith({bool? dataComplete, DateTime? lastUpdated}) => Player(
@@ -378,5 +393,7 @@ class Player {
         dismissalHistory: dismissalHistory,
         dataComplete: dataComplete ?? this.dataComplete,
         lastUpdated: lastUpdated ?? this.lastUpdated,
+        source: source,
+        sourceMatches: sourceMatches,
       );
 }
