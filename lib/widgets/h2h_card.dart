@@ -23,7 +23,9 @@ class H2HCard extends StatelessWidget {
     // Draws / no-results = total minus both win counts (never negative).
     final draws =
         (total - winsA - winsB).clamp(0, total < 0 ? 0 : total);
-    final frac = total == 0 ? 0.5 : (winsA / total).clamp(0.0, 1.0);
+    // Empty state: no matches => empty bar (0.0), never a 50/50
+    // bar that implies a real split.
+    final frac = total == 0 ? 0.0 : (winsA / total).clamp(0.0, 1.0);
     // Winner gets gold, loser gets secondary. Draw = both gold.
     final aLeads = winsA > winsB;
     final bLeads = winsB > winsA;
@@ -74,7 +76,8 @@ class H2HCard extends StatelessWidget {
                   color: Colors.white.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Text('$winsA — $winsB',
+                // Empty state: '—', never "0 — 0" as a scoreline.
+                child: Text(total == 0 ? '—' : '$winsA — $winsB',
                     style: const TextStyle(fontWeight: FontWeight.w900)),
               ),
               const SizedBox(width: 8),
@@ -117,10 +120,15 @@ class H2HCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 8),
+          // total == 0 is an EMPTY state, not a 0-0 result: say so
+          // plainly instead of presenting "0 — 0 • 0 matches" as if
+          // the teams genuinely never met.
           Text(
-              draws > 0
-                  ? '$teamA $winsA — $winsB $teamB • $total matches • $draws draw${draws == 1 ? '' : 's'} / no-result${draws == 1 ? '' : 's'}'
-                  : '$teamA $winsA — $winsB $teamB • $total matches',
+              total == 0
+                  ? 'No head-to-head matches in the loaded data yet.'
+                  : draws > 0
+                      ? '$teamA $winsA — $winsB $teamB • $total matches • $draws draw${draws == 1 ? '' : 's'} / no-result${draws == 1 ? '' : 's'}'
+                      : '$teamA $winsA — $winsB $teamB • $total matches',
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(color: AppTheme.textSecondary)),
