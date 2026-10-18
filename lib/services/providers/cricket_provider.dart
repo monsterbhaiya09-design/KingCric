@@ -28,6 +28,17 @@ abstract class CricketProvider {
   /// Live / upcoming / recent matches, or null when unavailable.
   Future<List<CricketMatch>?> fetchMatches();
 
+  /// Upcoming fixtures ONLY (scheduled, not started), or null when
+  /// the provider has no fixtures endpoint. Default is null so
+  /// existing providers / test fakes keep compiling. The
+  /// orchestrator merges this with [fetchMatches] so the Upcoming tab
+  /// is never empty just because the "current matches" endpoint only
+  /// returns live/recent games (CricAPI /currentMatches does exactly
+  /// that — that was the Upcoming-empty bug).
+  Future<List<CricketMatch>?> fetchUpcoming() async {
+    return null;
+  }
+
   /// Full scorecard for one match, or null when unavailable
   /// (upcoming match, no scorecard yet, provider error).
   Future<CricketMatch?> fetchScorecard(String matchId);
