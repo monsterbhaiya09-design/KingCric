@@ -96,6 +96,8 @@ class EntitySportProvider implements CricketProvider {
       }
     }
     if (home.isEmpty || away.isEmpty) return null;
+    home = ProviderParsing.titleCaseTeam(home);
+    away = ProviderParsing.titleCaseTeam(away);
     final statusRaw = ProviderParsing.toStr(
         m['status_str'] ?? m['status'] ?? m['match_status'] ?? '');
     final status = ProviderParsing.statusFromText(statusRaw);
