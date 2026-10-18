@@ -62,22 +62,153 @@ class ProviderParsing {
     return (runs, wickets);
   }
 
-  static MatchStatus statusFromText(String raw) {
+  static MatchStatus statusFromText(String raw) => resolveStatus(
+        raw: raw, matchStarted: null, matchEnded: null, hasScores: false);
+
+  /// Resolve a match status from every signal a provider gives us.
+  ///
+  /// BUG FIX (V3 screenshots): CricAPI's `status` for an in-progress
+  /// match reads like "Austria Women need 88 runs in 78 balls" — it
+  /// contains neither "live" nor "won", so the old parser filed it as
+  /// UPCOMING and the Live tab showed "No matches in this section."
+  /// A match with runs on the board and no result IS in progress.
+  ///
+  /// Precedence: ended/result > started/scores/in-progress > upcoming.
+  /// "not started" / "yet to start" / "scheduled" always win over any
+  /// "started"-looking substring (e.g. "Match not started").
+  static MatchStatus resolveStatus({
+    required String raw,
+    bool? matchStarted,
+    bool? matchEnded,
+    bool hasScores = false,
+  }) {
     final s = raw.toLowerCase();
-    if (s.contains('live') ||
-        s.contains('in play') ||
-        s.contains('in progress') ||
-        s.contains('playing')) {
-      return MatchStatus.live;
-    }
-    if (s.contains('won') ||
+    if (matchEnded == true) return MatchStatus.completed;
+    // Result phrases — check before in-progress ones ("won" also
+    // appears in some live commentary, but "won by" is terminal).
+    // NOTE: "won the" alone is NOT terminal — "won the toss" appears
+    // on upcoming/live matches. Require "won the match".
+    if (s.contains('won by') ||
+        s.contains('won the match') ||
         s.contains('result') ||
         s.contains('finished') ||
         s.contains('completed') ||
-        s.contains('match ended')) {
+        s.contains('match ended') ||
+        s.contains('match drawn') ||
+        s.contains('drawn') ||
+        s.contains('no result') ||
+        s.contains('abandoned')) {
       return MatchStatus.completed;
     }
+    // Explicitly not started — must beat the "started" substring.
+    if (s.contains('not started') ||
+        s.contains('yet to start') ||
+        s.contains('scheduled') ||
+        s.contains('preview') ||
+        s.contains('upcoming') ||
+        s.contains('to be played')) {
+      return MatchStatus.upcoming;
+    }
+    if (matchStarted == true) return MatchStatus.live;
+    // Day-phase phrases (stumps / lunch / rain delay) only prove a
+    // match is live if play has actually started (scores on the
+    // board or matchStarted). A pre-toss "Rain delay" is upcoming.
+    final playStarted = hasScores || matchStarted == true;
+    if (playStarted &&
+        (s.contains('stumps') ||
+            s.contains('innings break') ||
+            s.contains('lunch') ||
+            s.contains('tea break') ||
+            s.contains('rain delay'))) {
+      return MatchStatus.live;
+    }
+    if (s.contains('live') ||
+        s.contains('in play') ||
+        s.contains('in progress') ||
+        s.contains('playing') ||
+        s.contains('need ') ||
+        s.contains('needs ') ||
+        s.contains('require') ||
+        s.contains('trail') ||
+        s.contains('lead by') ||
+        s.contains('lead of') ||
+        s.contains('day 1') ||
+        s.contains('day 2') ||
+        s.contains('day 3') ||
+        s.contains('day 4') ||
+        s.contains('day 5') ||
+        s.contains('overs left') ||
+        s.contains('balls left') ||
+        s.contains('to win')) {
+      return MatchStatus.live;
+    }
+    // Runs on the board + no result = in progress, whatever the
+    // provider's status string says.
+    if (hasScores) return MatchStatus.live;
     return MatchStatus.upcoming;
+  }
+
+  /// Title-case a team name ("bulgaria women" -> "Bulgaria Women").
+  /// Short ALL-CAPS tokens (MI, CSK, IPL, USA) are abbreviations and
+  /// are kept as-is. Longer ALL-CAPS words are title-cased.
+  static String titleCaseTeam(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return trimmed;
+    return trimmed.split(RegExp(r'\s+')).map((word) {
+      if (word.isEmpty) return word;
+      final isAllCaps =
+          word == word.toUpperCase() && word.length <= 4;
+      if (isAllCaps) return word;
+      final first = word[0].toUpperCase();
+      final rest = word.length > 1 ? word.substring(1).toLowerCase() : '';
+      return '$first$rest';
+    }).join(' ');
+  }
+
+  /// Clean a raw innings/team label into ONE team name.
+  ///
+  /// BUG FIX (V3 screenshots): the Recent tab showed
+  /// "Bulgaria Women,Sweden Wo..." — a comma-joined pair of teams
+  /// (CricAPI's `inning` label can carry both teams) rendered as if
+  /// it were one team, plus lowercase ("bulgaria women Inning 1").
+  ///
+  /// Rules: if the label mentions exactly one of [teams], use it; if
+  /// it mentions both, use the one mentioned LAST (closest to the
+  /// "Inning N" suffix = the side that batted); otherwise strip the
+  /// "Inning N" suffix, take the part before the first comma, and
+  /// title-case it.
+  static String cleanTeamName(String raw, [List<String>? teams]) {
+    var s = raw.trim();
+    if (s.isEmpty) return s;
+    final known = (teams ?? []).where((t) => t.isNotEmpty).toList();
+    if (known.isNotEmpty) {
+      final lower = s.toLowerCase();
+      // Pick the match at the HIGHEST index; break ties by LONGEST
+      // name. Without the length tie-break, "India" (inside
+      // "India Women") could overwrite "India Women" at the same index.
+      String? bestMatch;
+      var bestIndex = -1;
+      var bestLen = -1;
+      for (final t in known) {
+        final idx = lower.lastIndexOf(t.toLowerCase());
+        if (idx < 0) continue;
+        if (idx > bestIndex || (idx == bestIndex && t.length > bestLen)) {
+          bestIndex = idx;
+          bestLen = t.length;
+          bestMatch = t;
+        }
+      }
+      if (bestMatch != null) return titleCaseTeam(bestMatch);
+    }
+    // Strip "Inning N" / "Innings N" suffix (case-insensitive).
+    s = s.replaceAll(
+        RegExp(r'\s+innings?\s*\d*\s*$', caseSensitive: false), '');
+    // A comma-joined label ("A,B") is two teams, not one: keep the
+    // last segment, which is the side closest to the innings marker.
+    if (s.contains(',')) {
+      s = s.split(',').last.trim();
+    }
+    return titleCaseTeam(s);
   }
 
   static double toDouble(Object? v, [double fallback = 0]) {
