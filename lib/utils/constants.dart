@@ -18,11 +18,20 @@ class AppConstants {
 
   static bool get hasApiKey => cricApiKey.isNotEmpty;
 
-  /// Free-tier friendly polling: live matches fast, finished matches
-  /// fetched once immediately, everything else backed off.
-  static const Duration livePollInterval = Duration(seconds: 45);
+  /// QUOTA-SAFE polling (free tier = 100 hits/day, lifetime).
+  /// NEVER poll every 45s: that burns ~1,920 calls/day and kills the
+  /// key before lunch. Live list refreshes every 10 min, idle every
+  /// 15 min, plus one manual Refresh and one extra fetch when a match
+  /// flips to completed. See API-SETUP.md "Quota budget".
+  static const Duration livePollInterval = Duration(minutes: 10);
   static const Duration finishedPollInterval = Duration(minutes: 5);
   static const Duration idlePollInterval = Duration(minutes: 15);
+
+  /// Cache TTLs (ApiService). Completed data never changes, so it is
+  /// cached far longer than live data — re-fetching a finished
+  /// scorecard is pure quota waste.
+  static const Duration liveCacheTtl = Duration(minutes: 10);
+  static const Duration completedCacheTtl = Duration(hours: 1);
 
   static const List<String> formats = ['Test', 'ODI', 'T20', 'T10'];
   static const List<String> leagues = [
