@@ -41,7 +41,52 @@ class Strings {
     'home': {'en': 'Home', 'hi': 'होम'},
     'live': {'en': 'Live', 'hi': 'लाइव'},
     'upcoming': {'en': 'Upcoming', 'hi': 'आने वाले'},
-    'recent': {'en': 'Recent', 'hi': 'हाल के'},
+    'recent': {'en': 'Finished', 'hi': 'समाप्त'},
+    'finished': {'en': 'Finished', 'hi': 'समाप्त'},
+    'info': {'en': 'Info', 'hi': 'जानकारी'},
+    'preview_info': {'en': 'Preview & Info', 'hi': 'प्रीव्यू और जानकारी'},
+    'overs_graph': {'en': 'Over-by-Over', 'hi': 'ओवर-दर-ओवर'},
+    'points_table': {'en': 'Points Table', 'hi': 'अंक तालिका'},
+    'top_players': {'en': 'Top Players', 'hi': 'टॉप खिलाड़ी'},
+    'format': {'en': 'Format', 'hi': 'फॉर्मेट'},
+    'all': {'en': 'All', 'hi': 'सभी'},
+    'disclaimer': {
+      'en': 'For information & entertainment only. Not betting advice.',
+      'hi': 'सिर्फ जानकारी और मनोरंजन के लिए। सट्टेबाजी की सलाह नहीं है।'
+    },
+    'source': {'en': 'Source', 'hi': 'स्रोत'},
+    'matches': {'en': 'Matches', 'hi': 'मैच'},
+    'last_updated_prefix': {'en': 'Last updated', 'hi': 'आखिरी अपडेट'},
+    // Home (Team 1) — every user-facing Home string, EN + हिं.
+    // Each key lives ONCE here (deduped 2026-10-18: the earlier
+    // speculative copies were removed — a duplicate const-map key
+    // is a compile error). Home composes no_matches_found with the
+    // search query, so its value ends with "for" by design.
+    'trending_players': {'en': 'Trending Players', 'hi': 'ट्रेंडिंग खिलाड़ी'},
+    'next_up': {'en': 'Next up', 'hi': 'अगला मैच'},
+    'no_live_matches': {
+      'en': 'No live matches right now.',
+      'hi': 'अभी कोई लाइव मैच नहीं है।'
+    },
+    'no_matches_section': {
+      'en': 'No matches in this section.',
+      'hi': 'इस सेक्शन में कोई मैच नहीं है।'
+    },
+    'no_matches_found': {
+      'en': 'No matches found for',
+      'hi': 'इसके लिए कोई मैच नहीं मिला'
+    },
+    'no_trending': {
+      'en': 'No trending players yet.',
+      'hi': 'अभी कोई ट्रेंडिंग खिलाड़ी नहीं है।'
+    },
+    'offline_banner': {
+      'en': 'Offline — showing last verified data.',
+      'hi': 'ऑफ़लाइन — आखिरी वेरिफाइड डेटा दिख रहा है।'
+    },
+    'refresh': {'en': 'Refresh', 'hi': 'रीफ़्रेश'},
+    'updating': {'en': 'Updating…', 'hi': 'अपडेट हो रहा है…'},
+    'format_filter_label': {'en': 'Format filter', 'hi': 'फॉर्मेट फ़िल्टर'},
     'leagues': {'en': 'Leagues', 'hi': 'लीग'},
     'stats': {'en': 'Stats', 'hi': 'स्टैट्स'},
     'favourites': {'en': 'Favourites', 'hi': 'पसंदीदा'},
@@ -81,10 +126,7 @@ class Strings {
       'en': 'Search player, team, match…',
       'hi': 'खिलाड़ी, टीम, मैच खोजें…'
     },
-    'ad_placeholder': {
-      'en': 'Ad placeholder — AdMob unit id not set yet',
-      'hi': 'विज्ञापन जगह — AdMob अभी सेट नहीं है'
-    },
+
     'mock_mode': {
       'en': 'Demo data — add a free API key to go live',
       'hi': 'डेमो डेटा — लाइव के लिए फ्री API key डालें'
