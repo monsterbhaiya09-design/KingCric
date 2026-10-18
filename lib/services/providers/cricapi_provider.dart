@@ -109,7 +109,17 @@ class CricApiProvider implements CricketProvider {
     if (_capped) return null;
     _hits++;
     try {
-      return await _client.get(uri).timeout(const Duration(seconds: 15));
+      final res = await _client.get(uri).timeout(const Duration(seconds: 15));
+      // MAIN-CORE FIX: HTTP 429 = server-side rate/quota cut-off.
+      // The body is not a normal envelope, so no fetch method would
+      // call _updateQuota — without this, a 429 never set
+      // quotaExhausted, the Home quota banner never appeared, and
+      // the app silently degraded to demo/backstop data.
+      if (res.statusCode == 429) {
+        _quotaError = true;
+        _serverHitsLeft = 0;
+      }
+      return res;
     } catch (_) {
       return null;
     }
