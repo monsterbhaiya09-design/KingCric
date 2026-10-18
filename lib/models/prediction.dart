@@ -17,6 +17,12 @@ class Prediction {
   final String explanationEn;
   final String explanationHi;
 
+  /// False when the player has NO signal at all (no career matches,
+  /// no recent form, no matchups). The UI must show "Not enough data"
+  /// instead of a number — a prediction with no data behind it is a
+  /// fake number. Defaults true so existing call sites are unaffected.
+  final bool hasData;
+
   const Prediction({
     required this.playerId,
     required this.playerName,
@@ -31,6 +37,7 @@ class Prediction {
     required this.pitchScore,
     required this.explanationEn,
     required this.explanationHi,
+    this.hasData = true,
   });
 
   PredictionVerdict get verdict {
@@ -75,5 +82,6 @@ class Prediction {
         'pitchScore': pitchScore,
         'explanationEn': explanationEn,
         'explanationHi': explanationHi,
+        'hasData': hasData,
       };
 }
