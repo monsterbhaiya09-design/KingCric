@@ -189,15 +189,24 @@ class PlayerProfileScreen extends StatelessWidget {
                 label: lang.t('runs'),
                 value: '${overall.runs}',
                 barFraction: (overall.runs / 15000).clamp(0.0, 1.0)),
+            // No matches => '—', never "0.0": an average / strike
+            // rate over zero innings is undefined, not zero.
             StatCard(
                 label: lang.t('average'),
-                value: overall.average.toStringAsFixed(1),
-                barFraction: (overall.average / 60).clamp(0.0, 1.0)),
+                value: overall.matches == 0
+                    ? '—'
+                    : overall.average.toStringAsFixed(1),
+                barFraction: overall.matches == 0
+                    ? 0.0
+                    : (overall.average / 60).clamp(0.0, 1.0)),
             StatCard(
                 label: lang.t('strike_rate'),
-                value: overall.strikeRate.toStringAsFixed(1),
-                barFraction:
-                    (overall.strikeRate / 180).clamp(0.0, 1.0)),
+                value: overall.matches == 0
+                    ? '—'
+                    : overall.strikeRate.toStringAsFixed(1),
+                barFraction: overall.matches == 0
+                    ? 0.0
+                    : (overall.strikeRate / 180).clamp(0.0, 1.0)),
             StatCard(
                 label: lang.t('hundreds'),
                 value: '${overall.hundreds}',
@@ -214,14 +223,21 @@ class PlayerProfileScreen extends StatelessWidget {
                     fraction: (overall.runs / 15000).clamp(0.0, 1.0)),
                 StatBar(
                     label: 'Average ( / 60)',
-                    value: overall.average.toStringAsFixed(1),
-                    fraction: (overall.average / 60).clamp(0.0, 1.0),
+                    value: overall.matches == 0
+                        ? '—'
+                        : overall.average.toStringAsFixed(1),
+                    fraction: overall.matches == 0
+                        ? 0.0
+                        : (overall.average / 60).clamp(0.0, 1.0),
                     color: AppTheme.blue),
                 StatBar(
                     label: 'Strike Rate ( / 180)',
-                    value: overall.strikeRate.toStringAsFixed(1),
-                    fraction:
-                        (overall.strikeRate / 180).clamp(0.0, 1.0),
+                    value: overall.matches == 0
+                        ? '—'
+                        : overall.strikeRate.toStringAsFixed(1),
+                    fraction: overall.matches == 0
+                        ? 0.0
+                        : (overall.strikeRate / 180).clamp(0.0, 1.0),
                     color: AppTheme.green),
                 StatBar(
                     label: 'Boundaries (4s + 6s)',
@@ -363,9 +379,10 @@ class PlayerProfileScreen extends StatelessWidget {
   }
 
   /// Matchup row: tapping the bowler opens their profile (P12).
-  /// Match order: exact bowlerId first (Cricsheet ids), then exact
-  /// name, then last-name fallback — never a fuzzy last-name match
-  /// when an exact id/name exists.
+  /// Resolved via ApiService.fetchPlayer (Cricsheet-first, then
+  /// provider id resolution) — NOT fetchPlayers(), whose list is
+  /// mock-only (6 curated players) and could never resolve a real
+  /// Cricsheet bowler. bowlerId first, then the display name.
   Widget _tappableRow(
       BuildContext context, String title, String trailing, Matchup m) {
     return Container(
@@ -373,24 +390,12 @@ class PlayerProfileScreen extends StatelessWidget {
       decoration: AppTheme.premiumCard(radius: 12),
       child: InkWell(
         onTap: () async {
-          final players = await ApiService().fetchPlayers();
-          final lower = m.bowlerName.toLowerCase();
-          final last = lower.split(' ').last;
+          final api = ApiService();
           Player? found;
-          for (final p in players) {
-            if (p.id == m.bowlerId) {
-              found = p;
-              break;
-            }
+          if (m.bowlerId.trim().isNotEmpty) {
+            found = await api.fetchPlayer(m.bowlerId);
           }
-          found ??= players.where((p) => p.name.toLowerCase() == lower).isNotEmpty
-              ? players.firstWhere((p) => p.name.toLowerCase() == lower)
-              : null;
-          found ??= players
-                  .where((p) => p.name.toLowerCase().contains(last))
-                  .isNotEmpty
-              ? players.firstWhere((p) => p.name.toLowerCase().contains(last))
-              : null;
+          found ??= await api.fetchPlayer(m.bowlerName);
           if (!context.mounted) return;
           if (found == null) {
             ScaffoldMessenger.of(context).showSnackBar(
