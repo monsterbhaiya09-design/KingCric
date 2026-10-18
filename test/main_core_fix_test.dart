@@ -194,8 +194,14 @@ void main() {
         TeamScore(team: 'India', runs: 161, wickets: 4, batted: true),
       ],
     );
+    // MERGE-LEAD: same fixture from one provider carries the SAME id.
+    // (Different ids + same provider = distinct fixtures, e.g. a
+    // double-header where match 1 finished and match 2 is live —
+    // those must NOT merge. The old version of this test used a
+    // different id, which only passed because the old merge ignored
+    // the per-match source; MatchMerge is now the single definition.)
     final completedCopy = _m(
-      'done-1',
+      'live-1',
       'India',
       'Pakistan',
       status: MatchStatus.completed,
