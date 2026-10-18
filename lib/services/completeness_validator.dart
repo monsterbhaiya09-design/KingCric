@@ -13,10 +13,14 @@ import '../models/player.dart';
 ///    timestamp. Anything else is shown as "verifying", never as fact.
 class CompletenessValidator {
   /// Compare two copies of the same match (two free sources).
-  /// Returns true when the core facts agree.
+  /// Returns true when the core facts agree. Status is compared
+  /// EFFECTIVELY (completed / effectively-live), not by the raw
+  /// [MatchStatus] field — one provider may say upcoming while
+  /// another says live for the same in-progress match.
   static bool matchesAgree(CricketMatch a, CricketMatch b) {
     if (a.teamA != b.teamA || a.teamB != b.teamB) return false;
-    if (a.status != b.status) return false;
+    if (a.isCompleted != b.isCompleted) return false;
+    if (a.isEffectivelyLive != b.isEffectivelyLive) return false;
     if (a.scores.length != b.scores.length) return false;
     for (var i = 0; i < a.scores.length; i++) {
       if (a.scores[i].runs != b.scores[i].runs ||
@@ -50,7 +54,17 @@ class CompletenessValidator {
   }
 
   /// Is this player profile complete enough to present as fact?
+  /// Honesty rules (Squad E): a demo / mock / partial profile is
+  /// NEVER complete, even if it carries full-looking numbers —
+  /// mock players have curated stats. Only a profile whose source
+  /// computed real stats (e.g. Cricsheet) with dataComplete=true
+  /// can be complete.
   static bool isPlayerComplete(Player p) {
+    if (!p.dataComplete) return false;
+    final src = p.source.trim().toLowerCase();
+    if (src == 'demo' || src == 'mock' || src == 'partial') {
+      return false;
+    }
     if (p.name.isEmpty || p.id.isEmpty) return false;
     if (p.battingByFormat.isEmpty) return false;
     if (p.battingOverall().matches == 0) return false;
@@ -61,6 +75,17 @@ class CompletenessValidator {
       return false;
     }
     return true;
+  }
+
+  /// Honest completeness label for a profile. 'Complete' only from
+  /// [isPlayerComplete]; demo/mock sources are 'Demo' even with
+  /// full-looking numbers; everything else is 'Partial'. The UI
+  /// must render this label, never invent 'Complete' from stats.
+  static String completenessLabel(Player p) {
+    if (isPlayerComplete(p)) return 'Complete';
+    final src = p.source.trim().toLowerCase();
+    if (src == 'demo' || src == 'mock') return 'Demo';
+    return 'Partial';
   }
 
   /// Merge two sources: prefer the one that reconciles. If neither
