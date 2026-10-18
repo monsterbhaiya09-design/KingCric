@@ -112,8 +112,21 @@ class CricketMatch {
   bool get isEffectivelyLive {
     if (status == MatchStatus.live) return true;
     if (status != MatchStatus.upcoming) return false;
-    final won = result.toLowerCase().contains('won by') ||
-        result.toLowerCase().contains('won the');
+    // MAIN-CORE FIX: terminal means a RESULT, not the toss. The old
+    // check treated bare 'won the' as terminal, and CricAPI list
+    // entries carry the raw status text in [result] — so a live
+    // match whose status read "X won the toss and elected to bat"
+    // was classified NOT-live and hid under Upcoming with scores
+    // on the board (screenshot bug). Only result phrases are
+    // terminal here, mirroring ProviderParsing.resolveStatus.
+    final lower = result.toLowerCase();
+    final won = lower.contains('won by') ||
+        lower.contains('won the match') ||
+        lower.contains('match ended') ||
+        lower.contains('match drawn') ||
+        lower.contains('drawn') ||
+        lower.contains('no result') ||
+        lower.contains('abandoned');
     if (won) return false;
     return scores.any((s) => s.batted && (s.runs > 0 || s.wickets > 0));
   }
