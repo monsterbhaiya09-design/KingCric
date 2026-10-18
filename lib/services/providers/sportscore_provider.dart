@@ -128,6 +128,7 @@ class SportScoreProvider implements CricketProvider {
   }
 
   @override
+  @override
   Future<List<CricketMatch>?> fetchMatches() async {
     if (_capped) return null;
     // Candidate widget paths (first parseable win). All are under the
@@ -148,6 +149,13 @@ class SportScoreProvider implements CricketProvider {
     }
     return null;
   }
+
+  // No stable fixtures endpoint: fetchMatches already covers
+  // fixtures via its candidate paths.
+  // (Implements requires an explicit override; base default is
+  // not inherited through `implements`.)
+  @override
+  Future<List<CricketMatch>?> fetchUpcoming() async => null;
 
   @override
   Future<CricketMatch?> fetchScorecard(String matchId) async {
