@@ -163,6 +163,10 @@ class CricApiProvider implements CricketProvider {
         matchups: base.matchups,
         dismissalHistory: base.dismissalHistory,
         dataComplete: false,
+        // Honest source: provider gave identity only; the deep
+        // stats riding along are the curated demo set (dataComplete
+        // false), NOT CricAPI-verified career numbers.
+        source: 'cricapi',
         lastUpdated: DateTime.now(),
       );
     } catch (_) {
@@ -172,15 +176,37 @@ class CricApiProvider implements CricketProvider {
 
   CricketMatch _matchFromFreeApi(Map<String, dynamic> j) {
     final teams = ((j['teams'] as List?) ?? []).map((e) => '$e').toList();
-    final teamA = teams.isNotEmpty ? teams[0] : 'Team A';
-    final teamB = teams.length > 1 ? teams[1] : 'Team B';
-    final statusRaw = (j['status'] as String? ?? '').toLowerCase();
-    final status = statusRaw.contains('live')
-        ? MatchStatus.live
-        : statusRaw.contains('won') || statusRaw.contains('result')
-            ? MatchStatus.completed
-            : MatchStatus.upcoming;
+    final teamA = ProviderParsing.titleCaseTeam(
+        teams.isNotEmpty ? teams[0] : 'Team A');
+    final teamB = ProviderParsing.titleCaseTeam(
+        teams.length > 1 ? teams[1] : 'Team B');
+    // CricAPI booleans may arrive as bool or "true"/"false" strings.
+    bool? asBool(Object? v) {
+      if (v is bool) return v;
+      if (v is String) {
+        if (v.toLowerCase() == 'true') return true;
+        if (v.toLowerCase() == 'false') return false;
+      }
+      return null;
+    }
+
     final score = (j['score'] as List?) ?? [];
+    final hasScores = score.any((s) {
+      final m = (s as Map).cast<String, dynamic>();
+      final r = (m['r'] as num?)?.toInt() ?? 0;
+      final w = (m['w'] as num?)?.toInt() ?? 0;
+      final o = (m['o'] as num?)?.toDouble() ?? 0;
+      return r > 0 || w > 0 || o > 0;
+    });
+    // V3 BUG FIX: status text alone misclassifies in-progress matches
+    // ("...need 88 runs in 78 balls" has no "live"/"won"). Resolve from
+    // matchStarted/matchEnded + scores + status text together.
+    final status = ProviderParsing.resolveStatus(
+      raw: j['status'] as String? ?? '',
+      matchStarted: asBool(j['matchStarted']),
+      matchEnded: asBool(j['matchEnded']),
+      hasScores: hasScores,
+    );
     final scores = <TeamScore>[];
     for (final s in score) {
       final m = (s as Map).cast<String, dynamic>();
@@ -188,7 +214,11 @@ class CricApiProvider implements CricketProvider {
       final w = (m['w'] as num?)?.toInt() ?? 0;
       final o = (m['o'] as num?)?.toDouble() ?? 0;
       scores.add(TeamScore(
-        team: m['inning'] as String? ?? '',
+        // V3 BUG FIX: `inning` can be a comma-joined pair
+        // ("Bulgaria Women,Sweden Women Inning 2") or lowercase
+        // ("bulgaria women Inning 1"). Clean to ONE title-cased team.
+        team: ProviderParsing.cleanTeamName(
+            m['inning'] as String? ?? '', [teamA, teamB]),
         runs: r,
         wickets: w,
         overs: o,
@@ -313,7 +343,8 @@ class CricApiProvider implements CricketProvider {
     final wickets = (j['wickets'] as num?)?.toInt() ??
         batting.where((b) => !b.notOut).length;
     return Innings(
-      team: j['inning'] as String? ?? '',
+      team: ProviderParsing.cleanTeamName(
+          j['inning'] as String? ?? '', null),
       inningsNumber: inningsNumber,
       total: total,
       wickets: wickets,
