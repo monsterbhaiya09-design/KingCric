@@ -89,10 +89,10 @@ class TheSportsDbProvider implements CricketProvider {
     // and scores on the board is live, not upcoming.
     final status = ProviderParsing.resolveStatus(
       raw: statusRaw,
-      hasScores: homeScore.$1 > 0 ||
-          homeScore.$2 > 0 ||
-          awayScore.$1 > 0 ||
-          awayScore.$2 > 0,
+      hasScores: ProviderParsing.scoresPresent(
+              runs: homeScore.$1, wickets: homeScore.$2) ||
+          ProviderParsing.scoresPresent(
+              runs: awayScore.$1, wickets: awayScore.$2),
     );
     final dateStr = ProviderParsing.toStr(e['dateEvent']);
     final timeStr = ProviderParsing.toStr(e['strTime']);
@@ -141,45 +141,34 @@ class TheSportsDbProvider implements CricketProvider {
   @override
   Future<List<CricketMatch>?> fetchMatches() async {
     if (_capped) return null;
-    // Live first, then next fixtures as a schedule backstop.
+    // Live events ONLY. SQUAD D: the old fallback to
+    // searchevents.php?e=Cricket was a keyword title-search ("events
+    // with the word Cricket in the title") presented as fixtures —
+    // sparse, arbitrary junk. A backstop must never invent fixtures:
+    // no live events -> null, orchestrator falls through.
     final live = await _getJson(_uri('livescore.php?s=Cricket'));
+    if (live == null) return null;
+    final received = _events(live);
     final parsed = <CricketMatch>[];
-    if (live != null) {
-      for (final e in _events(live)) {
-        final m = _matchFromEvent(e);
-        if (m != null) parsed.add(m);
-      }
+    for (final e in received) {
+      final m = _matchFromEvent(e);
+      if (m != null) parsed.add(m);
     }
-    debugPrint('KingCric [TheSportsDB] fetchMatches: kept=${parsed.length}');
-    if (parsed.isNotEmpty) return parsed;
-    // No live events: return upcoming fixtures from a generic search.
-    final next =
-        await _getJson(_uri('searchevents.php?e=Cricket'));
-    if (next != null) {
-      for (final e in _events(next)) {
-        final m = _matchFromEvent(e);
-        if (m != null) parsed.add(m);
-      }
-    }
+    debugPrint('KingCric [TheSportsDB] fetchMatches: received=${received.length} dropped=${received.length - parsed.length} kept=${parsed.length}');
     return parsed.isEmpty ? null : parsed;
   }
 
   @override
   Future<List<CricketMatch>?> fetchUpcoming() async {
-    if (_capped) return null;
-    final next = await _getJson(_uri('searchevents.php?e=Cricket'));
-    if (next == null) return null;
-    final parsed = <CricketMatch>[];
-    for (final e in _events(next)) {
-      final m = _matchFromEvent(e);
-      if (m != null &&
-          m.status == MatchStatus.upcoming &&
-          !m.isEffectivelyLive) {
-        parsed.add(m);
-      }
-    }
-    debugPrint('KingCric [TheSportsDB] fetchUpcoming: kept=${parsed.length}');
-    return parsed.isEmpty ? null : parsed;
+    // SQUAD D: TheSportsDB has NO real fixtures endpoint in the free
+    // V1 API — only the searchevents.php keyword title-search, which
+    // is junk as fixtures (most fixtures are titled "Team A vs Team
+    // B" with no word "Cricket"). Returning [] + a log keeps the
+    // Upcoming tab honest: CricAPI/EliteSport supply real fixtures,
+    // this provider supplies none. Never keyword-search junk
+    // presented as fixtures.
+    debugPrint('KingCric [TheSportsDB] fetchUpcoming: received=0 dropped=0 kept=0 (no real fixtures endpoint; keyword search disabled)');
+    return const [];
   }
 
   @override
