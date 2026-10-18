@@ -61,6 +61,10 @@ class CricketMatch {
   final int teamBWinsH2H;
   final int totalH2H;
   final DateTime? lastUpdated;
+  // V2: match context for full scoreboard header.
+  final String umpires;
+  final String matchReferee;
+  final String pitchReport;
 
   const CricketMatch({
     required this.id,
@@ -86,6 +90,9 @@ class CricketMatch {
     this.teamBWinsH2H = 0,
     this.totalH2H = 0,
     this.lastUpdated,
+    this.umpires = '',
+    this.matchReferee = '',
+    this.pitchReport = '',
   });
 
   String get title => '$teamA vs $teamB';
@@ -141,6 +148,9 @@ class CricketMatch {
       teamAWinsH2H: (j['teamAWinsH2H'] as num?)?.toInt() ?? 0,
       teamBWinsH2H: (j['teamBWinsH2H'] as num?)?.toInt() ?? 0,
       totalH2H: (j['totalH2H'] as num?)?.toInt() ?? 0,
+      umpires: j['umpires'] as String? ?? '',
+      matchReferee: j['matchReferee'] as String? ?? '',
+      pitchReport: j['pitchReport'] as String? ?? '',
       lastUpdated: j['lastUpdated'] == null
           ? null
           : DateTime.tryParse(j['lastUpdated'] as String),
@@ -170,6 +180,9 @@ class CricketMatch {
         'teamAWinsH2H': teamAWinsH2H,
         'teamBWinsH2H': teamBWinsH2H,
         'totalH2H': totalH2H,
+        'umpires': umpires,
+        'matchReferee': matchReferee,
+        'pitchReport': pitchReport,
         'lastUpdated': lastUpdated?.toIso8601String(),
       };
 }
