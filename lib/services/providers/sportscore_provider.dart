@@ -70,10 +70,10 @@ class SportScoreProvider implements CricketProvider {
 
   CricketMatch? _matchFromGeneric(Map<String, dynamic> m) {
     // Accept many field namings; require two team names to count.
-    final home = ProviderParsing.toStr(
-        m['home_team'] ?? m['homeTeam'] ?? m['teamA'] ?? m['team1'] ?? '');
-    final away = ProviderParsing.toStr(
-        m['away_team'] ?? m['awayTeam'] ?? m['teamB'] ?? m['team2'] ?? '');
+    final home = ProviderParsing.titleCaseTeam(ProviderParsing.toStr(
+        m['home_team'] ?? m['homeTeam'] ?? m['teamA'] ?? m['team1'] ?? ''));
+    final away = ProviderParsing.titleCaseTeam(ProviderParsing.toStr(
+        m['away_team'] ?? m['awayTeam'] ?? m['teamB'] ?? m['team2'] ?? ''));
     if (home.isEmpty || away.isEmpty) return null;
     final statusRaw = ProviderParsing.toStr(
         m['status'] ?? m['state'] ?? m['match_status'] ?? '');
@@ -179,6 +179,7 @@ class SportScoreProvider implements CricketProvider {
       team: ProviderParsing.toStr(data['team'] ?? ''),
       role: ProviderParsing.toStr(data['position'] ?? data['role'] ?? 'Batter'),
       dataComplete: false,
+      source: 'sportscore',
       lastUpdated: DateTime.now(),
     );
   }
