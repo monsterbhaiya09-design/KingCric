@@ -7,10 +7,8 @@ import '../utils/strings.dart';
 import '../utils/constants.dart';
 import '../widgets/language_toggle.dart';
 import '../widgets/match_card.dart';
-import '../widgets/player_card.dart';
 import '../widgets/premium_widgets.dart';
 import 'match_detail_screen.dart';
-import 'player_profile_screen.dart';
 
 /// V2 Home — PREMIUM King look: gradient hero, live pulse, bold scores,
 /// gold borders, animated match cards. Same navigation, richer visuals.
@@ -22,7 +20,6 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   late final ApiService _api;
-  late final Future<List<dynamic>> _playersFuture;
   final TextEditingController _searchController = TextEditingController();
   List<CricketMatch> _matches = [];
   bool _loading = true;
@@ -37,9 +34,8 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _api = ApiService();
-    // G5: cache the Trending future once — a FutureBuilder that
-    // re-fires on every build burns quota and flickers.
-    _playersFuture = _api.fetchPlayers();
+    // MATCH-CENTRIC: Home shows matches ONLY. Players appear only
+    // inside a match (Squad tab) — no Trending Players section here.
     _load();
   }
 
@@ -49,7 +45,10 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  Future<void> _load() async {
+  /// [force] = user explicitly pulled / tapped Refresh: bypass the
+  /// 10-min cache, otherwise a refresh inside the TTL window was a
+  /// no-op and the user saw the same stale list (reported bug).
+  Future<void> _load({bool force = false}) async {
     if (_loadingMatches) return;
     _loadingMatches = true;
     // Only show the full-page spinner on first load; refreshes keep
@@ -58,10 +57,15 @@ class _HomeScreenState extends State<HomeScreen> {
       setState(() => _loading = true);
     }
     try {
-      final m = await _api.fetchMatches();
+      final m = await _api.fetchMatches(forceRefresh: force);
+      // Upcoming fixtures live in a separate 60-min cache (they are
+      // NOT in CricAPI /currentMatches). Merge them in so the
+      // Upcoming tab is real, not empty.
+      final upcoming = await _api.fetchUpcoming(forceRefresh: force);
+      final merged = ApiService.mergeMatches([m, upcoming]);
       if (!mounted) return;
       setState(() {
-        _matches = m;
+        _matches = merged;
         _loading = false;
         _offline = false;
         _lastUpdated = DateTime.now();
@@ -139,7 +143,7 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     final lang = context.watch<LanguageProvider>();
     return RefreshIndicator(
-      onRefresh: _load,
+      onRefresh: () => _load(force: true),
       // Always scrollable so pull-to-refresh works even with a
       // short list (otherwise a 1-card list can never refresh).
       child: ListView(
@@ -256,6 +260,27 @@ class _HomeScreenState extends State<HomeScreen> {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 12)),
             ),
+          // Quota / all-providers-down banner: a key is configured
+          // but the last fetch fell back to demo. Never silently
+          // present demo data as live (reported bug: "live" match
+          // with no data was actually demo).
+          if (_api.isLive && _api.lastFetchWasMock && !_loading)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 10),
+              decoration: BoxDecoration(
+                  color: AppTheme.amber.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                      color: AppTheme.amber.withValues(alpha: 0.4))),
+              child: const Text(
+                  'Live data unavailable right now — showing demo data. '
+                  'Daily API quota may be exhausted. Pull to refresh later.',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12)),
+            ),
           // G4: offline banner — last verified data stays on screen,
           // and the user is told why it may be stale.
           if (_offline)
@@ -299,7 +324,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
               ),
               TextButton.icon(
-                onPressed: _load,
+                onPressed: () => _load(force: true),
                 icon: const Icon(Icons.refresh, size: 16),
                 label: Text(lang.t('refresh')),
               ),
@@ -385,36 +410,18 @@ class _HomeScreenState extends State<HomeScreen> {
                               MatchDetailScreen(match: m)));
                 }),
           const AdPlaceholder(),
-          PremiumSectionHeader(
-              title: lang.t('trending_players'), icon: Icons.trending_up),
-          // G5: cached future (see initState) — never re-fires per build.
-          FutureBuilder<List<dynamic>>(
-            future: _playersFuture,
-            builder: (context, snap) {
-              if (snap.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
-              }
-              if (snap.hasError || !snap.hasData || snap.data!.isEmpty) {
-                return Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Text(lang.t('no_trending'),
-                      textAlign: TextAlign.center),
-                );
-              }
-              return Column(
-                children: snap.data!
-                    .take(4)
-                    .map((p) => PlayerCard(
-                          player: p,
-                          onTap: () => Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                  builder: (_) =>
-                                      PlayerProfileScreen(player: p))),
-                        ))
-                    .toList(),
-              );
-            },
+          // MATCH-CENTRIC: no Trending Players on Home. Players live
+          // inside their match (Squad tab). Browse all players via
+          // the Stats tab if needed.
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Text(
+                lang.t('home_players_hint'),
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                    color: AppTheme.textSecondary, fontSize: 12)),
           ),
         ],
       ),
