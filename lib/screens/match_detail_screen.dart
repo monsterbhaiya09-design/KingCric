@@ -5,6 +5,7 @@ import '../models/match.dart';
 import '../models/player.dart';
 import '../models/venue.dart';
 import '../services/api_service.dart';
+import '../services/cricsheet_service.dart';
 import '../services/prediction_engine.dart';
 import '../utils/app_theme.dart';
 import '../utils/strings.dart';
@@ -129,6 +130,43 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   // and flickering the Squad / Prediction tabs).
   late final Future<List<Player>> _playersFuture;
   late final Future<List<Venue>> _venuesFuture;
+  // CRICSHEET-WIRING: Cricsheet futures are LAZY — created on
+  // first use by a Squad / Venue / Prediction tab, then cached.
+  // The 25 MB asset must NOT be parsed in initState: a user who
+  // only opens Live / Scorecard would pay the parse for nothing,
+  // and eager creation also starts the platform-channel asset
+  // load before the first frame. One Cricsheet load is shared by
+  // all three tabs (the asset is parsed once per app run via the
+  // static cache in CricsheetService.loadBundled).
+  Future<Map<String, List<Player>>>? _cricsheetSquadsFuture;
+  Future<Map<String, int>>? _cricsheetH2HFuture;
+  Future<VenueStats?>? _cricsheetVenueFuture;
+  Future<List<Matchup>>? _cricsheetMatchupsFuture;
+
+  /// Gender for Cricsheet queries: providers write "Pakistan
+  /// Women" for women's matches and bare names for men's;
+  /// Cricsheet stores both under "Pakistan" and separates them
+  /// with its gender field — without this, a men's squad fills
+  /// with women's players.
+  String get _cricsheetGender =>
+      _match.teamA.toLowerCase().contains('women') ||
+              _match.teamB.toLowerCase().contains('women')
+          ? 'female'
+          : 'male';
+
+  Future<Map<String, List<Player>>> get _squadsFuture =>
+      _cricsheetSquadsFuture ??= ApiService().cricsheetSquadsFor(
+          _match.teamA, _match.teamB,
+          format: _match.format, gender: _cricsheetGender);
+  Future<Map<String, int>> get _h2hFuture =>
+      _cricsheetH2HFuture ??= ApiService().cricsheetHeadToHead(
+          _match.teamA, _match.teamB,
+          format: _match.format, gender: _cricsheetGender);
+  Future<VenueStats?> get _venueFuture => _cricsheetVenueFuture ??=
+      ApiService()
+          .cricsheetVenueStats(_match.venueName, gender: _cricsheetGender);
+  Future<List<Matchup>> get _matchupsFuture =>
+      _cricsheetMatchupsFuture ??= _loadCricsheetMatchups();
   bool _refreshingDetail = false;
 
   @override
@@ -139,6 +177,9 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     _tabs = TabController(length: 5, vsync: this);
     _playersFuture = ApiService().fetchPlayers();
     _venuesFuture = ApiService().fetchVenues();
+    // NOTE: Cricsheet futures are lazy (getters above) — NOT
+    // created here. Creating them in initState would parse the
+    // 25 MB asset on every match open, even for Live / Scorecard.
     // AUTO-FETCH on open (was manual-Retry only): the list entry from
     // /currentMatches carries NO innings, so without this call every
     // live match opened with an empty scorecard. Non-force: respects
@@ -285,6 +326,9 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
 
   String _squadSourceLabel(String sourceKey) {
     switch (sourceKey) {
+      case 'cricsheet':
+        return 'Squad: Real • Cricsheet • calculated from ball-by-ball '
+            'data (2024–2026 dataset)';
       case 'official':
         return 'Squad: official squad list';
       case 'team':
@@ -293,6 +337,43 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
         return 'Squad: from scorecard names (full stats not available)';
       default:
         return 'Squad not available yet for this team.';
+    }
+  }
+
+  /// CRICSHEET-WIRING: Cricsheet squads come FIRST. The old chain
+  /// (official ids → mock team filter → scorecard names) meant every
+  /// real match showed 2 Demo players + 0 for the other team,
+  /// because CricAPI never supplies squads and the mock list only
+  /// covers India/Pakistan stars. Cricsheet covers ~1,847 real
+  /// players, so upcoming matches (no scorecard) get real squads
+  /// too. Falls back to the old chain only when Cricsheet has zero
+  /// players for that team.
+  (List<Player>, String) _resolveSquadWithCricsheet(
+      List<Player> all,
+      Map<String, List<Player>> csSquads,
+      List<String> ids,
+      String teamName) {
+    final cs = csSquads[teamName];
+    if (cs != null && cs.isNotEmpty) return (cs, 'cricsheet');
+    return _resolveSquad(all, ids, teamName);
+  }
+
+  /// Cross-squad Cricsheet matchups for the resolved squads.
+  /// Returns [] when Cricsheet has no matchup data for these
+  /// squads — the Venue tab then shows the honest no-data line
+  /// (never falls back to mock matchups for Cricsheet squads).
+  Future<List<Matchup>> _loadCricsheetMatchups() async {
+    try {
+      final all = await _playersFuture;
+      final csSquads = await _squadsFuture;
+      final (squadA, _) =
+          _resolveSquadWithCricsheet(all, csSquads, _match.squadA, _match.teamA);
+      final (squadB, _) =
+          _resolveSquadWithCricsheet(all, csSquads, _match.squadB, _match.teamB);
+      if (squadA.isEmpty && squadB.isEmpty) return [];
+      return await ApiService().cricsheetCrossMatchups(squadA, squadB);
+    } catch (_) {
+      return [];
     }
   }
 
@@ -307,30 +388,32 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   /// source returns null does the SnackBar appear — and it says so
   /// honestly instead of pretending the player has no data.
   Future<void> _openPlayerByName(String name) async {
-    final players = await _playersFuture;
+    // CRICSHEET-WIRING (resumed): fetch FIRST (Cricsheet-first,
+    // offline, cached). The old order searched the local mock list
+    // first, so tapping Babar / Shaheen / Virat / Rohit / Bumrah /
+    // Surya opened the DEMO mock profile even though the Squad row
+    // itself showed Real Cricsheet stats. Local list is only a
+    // fallback when every source returns null.
     Player? found;
-    final lower = name.toLowerCase();
-    for (final p in players) {
-      if (p.name.toLowerCase() == lower) {
-        found = p;
-        break;
-      }
+    try {
+      found = await ApiService().fetchPlayer(name);
+    } catch (_) {
+      found = null;
     }
-    found ??= players.where((p) {
-      final parts = lower.split(' ');
-      return parts.isNotEmpty &&
-          p.name.toLowerCase().contains(parts.last);
-    }).firstOrNull;
     if (found == null) {
-      // Not in the local list: fetch (Cricsheet -> provider lookup).
-      // A scorecard name like 'Aiden Markram' resolves via the
-      // provider's player-id lookup; a name no source knows stays
-      // unavailable — but only AFTER trying.
-      try {
-        found = await ApiService().fetchPlayer(name);
-      } catch (_) {
-        found = null;
+      final players = await _playersFuture;
+      final lower = name.toLowerCase();
+      for (final p in players) {
+        if (p.name.toLowerCase() == lower) {
+          found = p;
+          break;
+        }
       }
+      found ??= players.where((p) {
+        final parts = lower.split(' ');
+        return parts.isNotEmpty &&
+            p.name.toLowerCase().contains(parts.last);
+      }).firstOrNull;
     }
     if (!mounted) return;
     if (found == null) {
@@ -1218,7 +1301,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
 
   Widget _squadTab() {
     return FutureBuilder(
-      future: _playersFuture,
+      future: Future.wait([_playersFuture, _squadsFuture]),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -1243,15 +1326,17 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             ),
           );
         }
-        final all = snap.data!;
-        // MATCH-CENTRIC squad: Team A / Team B, each resolved through
-        // the fallback chain (official ids → team filter →
-        // scorecard names). Never one flat list, never blank, never
-        // fake stats — every row carries this match's context.
-        final (squadA, srcA) =
-            _resolveSquad(all, _match.squadA, _match.teamA);
-        final (squadB, srcB) =
-            _resolveSquad(all, _match.squadB, _match.teamB);
+        final all = snap.data![0] as List<Player>;
+        final csSquads =
+            snap.data![1] as Map<String, List<Player>>;
+        // MATCH-CENTRIC squad: Team A / Team B, Cricsheet FIRST,
+        // then the old fallback chain (official ids → team filter
+        // → scorecard names). Never one flat list, never blank,
+        // never fake stats — every row carries this match's context.
+        final (squadA, srcA) = _resolveSquadWithCricsheet(
+            all, csSquads, _match.squadA, _match.teamA);
+        final (squadB, srcB) = _resolveSquadWithCricsheet(
+            all, csSquads, _match.squadB, _match.teamB);
         Widget teamSection(String team, List<Player> squad,
             String opponent, String srcKey) {
           return Column(
@@ -1325,7 +1410,14 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
 
   Widget _venueH2HTab(LanguageProvider lang) {
     return FutureBuilder(
-      future: Future.wait([_playersFuture, _venuesFuture]),
+      future: Future.wait([
+        _playersFuture,
+        _venuesFuture,
+        _squadsFuture,
+        _h2hFuture,
+        _venueFuture,
+        _matchupsFuture,
+      ]),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -1352,14 +1444,45 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
         }
         final all = snap.data![0] as List<Player>;
         final venues = snap.data![1] as List<Venue>;
+        final csSquads =
+            snap.data![2] as Map<String, List<Player>>;
+        final csH2H = snap.data![3] as Map<String, int>;
+        final csVenue = snap.data![4] as VenueStats?;
+        final csMatchups = snap.data![5] as List<Matchup>;
         final venue = venues.where((v) =>
             (_match.venueId.isNotEmpty && v.id == _match.venueId) ||
             (v.name.isNotEmpty && v.name == _match.venueName)).firstOrNull;
-        final (squadA, _) =
-            _resolveSquad(all, _match.squadA, _match.teamA);
-        final (squadB, _) =
-            _resolveSquad(all, _match.squadB, _match.teamB);
-        final matchups = topPlayerMatchups(squadA, squadB);
+        // CRICSHEET-WIRING: same Cricsheet-first squads as the
+        // Squad tab, so H2H / matchups never see the 2-Demo + 0
+        // squads the old chain produced for real matches.
+        final (squadA, srcA) = _resolveSquadWithCricsheet(
+            all, csSquads, _match.squadA, _match.teamA);
+        final (squadB, srcB) = _resolveSquadWithCricsheet(
+            all, csSquads, _match.squadB, _match.teamB);
+        final fromCricsheet =
+            srcA == 'cricsheet' || srcB == 'cricsheet';
+        // Matchups: Cricsheet squads -> Cricsheet matchups ONLY
+        // (mock players' stored matchups would be Demo data
+        // wearing a real match's clothes). Mock squads -> the old
+        // topPlayerMatchups over stored lists.
+        final matchups = fromCricsheet
+            ? csMatchups
+            : topPlayerMatchups(squadA, squadB);
+        // H2H: Cricsheet computed numbers win when the dataset has
+        // any meeting between these teams; otherwise the match's
+        // own (provider) values, which are 0 when unknown.
+        final csH2HMatches = csH2H['matches'] ?? 0;
+        final h2hWinsA =
+            csH2HMatches > 0 ? (csH2H['teamAWins'] ?? 0) : _match.teamAWinsH2H;
+        final h2hWinsB =
+            csH2HMatches > 0 ? (csH2H['teamBWins'] ?? 0) : _match.teamBWinsH2H;
+        final h2hTotal =
+            csH2HMatches > 0 ? csH2HMatches : _match.totalH2H;
+        // Venue: provider card only when it actually carries
+        // stats; otherwise the Cricsheet computed card; otherwise
+        // the honest no-data line.
+        final providerVenueHasStats = venue != null &&
+            (venue.totalMatches > 0 || venue.pitchType.isNotEmpty);
 
         return ListView(
           padding: const EdgeInsets.all(14),
@@ -1379,7 +1502,9 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                       style: const TextStyle(
                           fontWeight: FontWeight.w900, fontSize: 18)),
                   const SizedBox(height: 4),
-                  if (venue != null) ...[
+                  // `venue != null` here is for type promotion —
+                  // providerVenueHasStats already implies it.
+                  if (venue != null && providerVenueHasStats) ...[
                     Text('${venue.city}, ${venue.country}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -1411,6 +1536,36 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(fontSize: 13)),
                     ],
+                  ] else if (csVenue != null) ...[
+                    // CRICSHEET-WIRING: computed from bundled
+                    // matches at this venue. Pitch / weather are
+                    // not in Cricsheet — those rows below stay
+                    // "Not available from free providers yet".
+                    if (csVenue.city.isNotEmpty)
+                      Text(csVenue.city,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary,
+                              fontSize: 13)),
+                    const SizedBox(height: 10),
+                    _venueStatRow('Avg 1st innings',
+                        csVenue.avgFirstInnings.toStringAsFixed(0)),
+                    _venueStatRow('Avg 2nd innings',
+                        csVenue.avgSecondInnings.toStringAsFixed(0)),
+                    _venueStatRow(
+                        'Matches at venue', '${csVenue.matches}'),
+                    _venueStatRow('Highest total',
+                        '${csVenue.highestTotal}'),
+                    _venueStatRow('Bat-first wins',
+                        '${csVenue.batFirstWinPct.toStringAsFixed(0)}%'),
+                    const SizedBox(height: 8),
+                    const Text(
+                        'Real • Cricsheet (2024–2026 dataset)',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            color: AppTheme.goldSoft, fontSize: 12)),
                   ] else ...[
                     const SizedBox(height: 6),
                     Text(lang.t('venue_no_data'),
@@ -1437,9 +1592,22 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             H2HCard(
               teamA: _match.teamA,
               teamB: _match.teamB,
-              winsA: _match.teamAWinsH2H,
-              winsB: _match.teamBWinsH2H,
-              total: _match.totalH2H,
+              winsA: h2hWinsA,
+              winsB: h2hWinsB,
+              total: h2hTotal,
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 6, bottom: 10),
+              child: Text(
+                  csH2HMatches > 0
+                      ? 'Real • Cricsheet (2024–2026 dataset)'
+                      : h2hTotal > 0
+                          ? 'Source: ${_match.source.isNotEmpty ? _match.source : 'provider'}'
+                          : lang.t('no_h2h_data'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: AppTheme.textSecondary, fontSize: 12)),
             ),
             PremiumSectionHeader(
                 title: lang.t('player_matchups'),
@@ -1513,7 +1681,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
 
   Widget _predictionTab() {
     return FutureBuilder(
-      future: _playersFuture,
+      future: Future.wait([_playersFuture, _squadsFuture]),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
@@ -1527,14 +1695,16 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             ),
           );
         }
-        final all = snap.data!;
+        final all = snap.data![0] as List<Player>;
+        final csSquads =
+            snap.data![1] as Map<String, List<Player>>;
         // MATCH-CENTRIC: predictions use the same resolved squads as
-        // the Squad tab — never an empty list when the Squad tab has
-        // players (scorecard fallback included).
-        final (squadA, _) =
-            _resolveSquad(all, _match.squadA, _match.teamA);
-        final (squadB, _) =
-            _resolveSquad(all, _match.squadB, _match.teamB);
+        // the Squad tab (Cricsheet first) — never an empty list when
+        // the Squad tab has players (scorecard fallback included).
+        final (squadA, _) = _resolveSquadWithCricsheet(
+            all, csSquads, _match.squadA, _match.teamA);
+        final (squadB, _) = _resolveSquadWithCricsheet(
+            all, csSquads, _match.squadB, _match.teamB);
         final squad = [...squadA, ...squadB];
         final preds = squad
             .where((p) => p.source != 'scorecard')
