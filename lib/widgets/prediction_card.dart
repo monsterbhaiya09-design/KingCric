@@ -32,6 +32,39 @@ class PredictionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // No-signal guard: when the engine found no career / form /
+    // matchup signal at all, a numeric score would be a fake number.
+    // Show the honest empty state instead of a ~50 donut.
+    if (!prediction.hasData) {
+      return Container(
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: AppTheme.premiumCard(),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(prediction.playerName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontWeight: FontWeight.w900, fontSize: 16)),
+              const SizedBox(height: 6),
+              const Text('Not enough data to predict.',
+                  style: TextStyle(
+                      color: AppTheme.textSecondary, fontSize: 13)),
+              const SizedBox(height: 8),
+              const Text(
+                  'Prediction is a model, not a guarantee. For information & entertainment only. Not betting advice.',
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: AppTheme.textSecondary, fontSize: 11)),
+            ],
+          ),
+        ),
+      );
+    }
     final isHindi = context.watch<LanguageProvider>().isHindi;
     final verdict = isHindi ? prediction.verdictHi() : prediction.verdictEn();
     final explanation =
