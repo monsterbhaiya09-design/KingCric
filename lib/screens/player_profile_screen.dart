@@ -102,6 +102,27 @@ class PlayerProfileScreen extends StatelessWidget {
                     ),
                   ],
                 ),
+                // Cricsheet: REAL calculated stats — label the scope
+                // honestly (sample dataset size), never as full career.
+                if (player.source == 'cricsheet') ...[
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      const Icon(Icons.verified,
+                          size: 16, color: AppTheme.green),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                            'Real • Cricsheet open data • ${player.sourceMatches} matches in dataset',
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontSize: 12,
+                                color: AppTheme.textSecondary)),
+                      ),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 12),
                 // Hero quick stats — always visible, no truncation.
                 Row(
