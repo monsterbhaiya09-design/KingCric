@@ -165,8 +165,25 @@ jobs:
         # Gradle failed (runs 39113688632 + 39115660438 both "passed"
         # Build while build-apk.log said BUILD FAILED and no APK
         # existed). Capture flutter's own exit code and exit with it.
+        # 2026-10-18 MULTI-SOURCE API: pass ALL free-provider keys as
+        # --dart-define from repo secrets. Each secret is optional:
+        # a missing secret expands to an empty define, the provider is
+        # skipped, and the build MUST NOT fail. Never echo a secret.
+        # Secrets to set (Settings -> Secrets -> Actions):
+        #   CRIC_API_KEY, ELITESPORT_API_KEY, ENTITYSPORT_API_KEY,
+        #   SPORTSDB_API_KEY (optional; defaults to test key "123").
+        env:
+          CRIC_API_KEY: ${{ secrets.CRIC_API_KEY }}
+          ELITESPORT_API_KEY: ${{ secrets.ELITESPORT_API_KEY }}
+          ENTITYSPORT_API_KEY: ${{ secrets.ENTITYSPORT_API_KEY }}
+          SPORTSDB_API_KEY: ${{ secrets.SPORTSDB_API_KEY }}
         run: |
-          flutter build apk --release >build-apk.log 2>&1 || BUILD_STATUS=$?
+          flutter build apk --release \
+            --dart-define=CRIC_API_KEY="${CRIC_API_KEY:-}" \
+            --dart-define=ELITESPORT_API_KEY="${ELITESPORT_API_KEY:-}" \
+            --dart-define=ENTITYSPORT_API_KEY="${ENTITYSPORT_API_KEY:-}" \
+            --dart-define=SPORTSDB_API_KEY="${SPORTSDB_API_KEY:-}" \
+            >build-apk.log 2>&1 || BUILD_STATUS=$?
           cat build-apk.log
           exit "${BUILD_STATUS:-0}"
 
