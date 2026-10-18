@@ -82,9 +82,18 @@ class TheSportsDbProvider implements CricketProvider {
     if (home.isEmpty || away.isEmpty) return null;
     final statusRaw = ProviderParsing.toStr(
         e['strStatus'] ?? e['strProgress'] ?? '');
-    final status = ProviderParsing.statusFromText(statusRaw);
     final homeScore = ProviderParsing.parseScoreString(e['intHomeScore']);
     final awayScore = ProviderParsing.parseScoreString(e['intAwayScore']);
+    // MAIN-CORE FIX: resolve with the REAL hasScores (same reason
+    // as SportScore) — a live event with strStatus "1st Innings"
+    // and scores on the board is live, not upcoming.
+    final status = ProviderParsing.resolveStatus(
+      raw: statusRaw,
+      hasScores: homeScore.$1 > 0 ||
+          homeScore.$2 > 0 ||
+          awayScore.$1 > 0 ||
+          awayScore.$2 > 0,
+    );
     final dateStr = ProviderParsing.toStr(e['dateEvent']);
     final timeStr = ProviderParsing.toStr(e['strTime']);
     DateTime start = DateTime.now();
