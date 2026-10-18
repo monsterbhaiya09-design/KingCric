@@ -10,20 +10,27 @@ class LanguageToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final lang = context.watch<LanguageProvider>();
+    // V3 BUG FIX: the old toggle (crown emoji + two padded chips) was
+    // wide enough to squeeze the "KingCric" header into "King...".
+    // Compact chips, no duplicate crown (the header already has one).
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        const Text('👑', style: TextStyle(fontSize: 20)),
-        const SizedBox(width: 4),
         ChoiceChip(
           label: const Text('EN'),
+          labelStyle: const TextStyle(fontSize: 12),
+          labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+          visualDensity: VisualDensity.compact,
           selected: !lang.isHindi,
           onSelected: (_) => lang.set(AppLanguage.english),
           selectedColor: AppTheme.gold,
         ),
-        const SizedBox(width: 6),
+        const SizedBox(width: 4),
         ChoiceChip(
           label: const Text('हिं'),
+          labelStyle: const TextStyle(fontSize: 12),
+          labelPadding: const EdgeInsets.symmetric(horizontal: 2),
+          visualDensity: VisualDensity.compact,
           selected: lang.isHindi,
           onSelected: (_) => lang.set(AppLanguage.hindi),
           selectedColor: AppTheme.gold,
@@ -33,27 +40,14 @@ class LanguageToggle extends StatelessWidget {
   }
 }
 
-/// Ad placeholder — shows only until a real AdMob unit id is set.
-/// Never shows a fake "ad" that looks like content.
+/// Ad slot. A placeholder is not an ad — until a REAL AdMob banner
+/// widget exists, this renders NOTHING (SizedBox.shrink), never a
+/// fake "Ad placeholder" box or any developer text. Checklist §8.17:
+/// no dev text in the release build, even when an AdMob unit id is
+/// configured — the real banner widget replaces this class then.
 class AdPlaceholder extends StatelessWidget {
   const AdPlaceholder({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      margin: const EdgeInsets.symmetric(vertical: 8),
-      padding: const EdgeInsets.all(10),
-      decoration: BoxDecoration(
-        color: AppTheme.navyCard2,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppTheme.gold.withValues(alpha: 0.3)),
-      ),
-      child: Text(
-        context.tr('ad_placeholder'),
-        textAlign: TextAlign.center,
-        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11),
-      ),
-    );
-  }
+  Widget build(BuildContext context) => const SizedBox.shrink();
 }
