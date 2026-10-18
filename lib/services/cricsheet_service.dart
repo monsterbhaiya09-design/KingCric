@@ -24,13 +24,17 @@ import '../models/player.dart';
 /// - recent form (last 5 matches, most recent first)
 /// - team H2H, partnerships, fall of wickets
 ///
-/// SCOPE HONESTY: the bundled asset is a SAMPLE subset (4 T20
-/// internationals). Stats built from it are REAL calculations over
-/// those matches, labelled `source: 'cricsheet'` with
-/// `sourceMatches` = matches in the dataset — never presented as a
-/// full career. The full dataset is the Cricsheet all_json.zip
-/// download (see CRICSHEET-DATA.md "Full dataset"). When more matches
-/// are loaded, the same code recomputes everything — no rework.
+/// SCOPE HONESTY: the bundled asset is a SUBSET (420 real
+/// internationals, Sep 2025 -> Oct 2026 — verified by counting
+/// matches by year; FIX7's "2024-01" claim was wrong, see
+/// CRICSHEET-WIRING.md). 303 T20 / 92 ODI / 25 Test; 263 male /
+/// 157 female.
+/// Stats built from it are REAL calculations over those matches,
+/// labelled `source: 'cricsheet'` with `sourceMatches` = matches in
+/// the dataset — never presented as a full career. The full dataset
+/// is the Cricsheet all_json.zip download (see CRICSHEET-DATA.md
+/// "Full dataset"). When more matches are loaded, the same code
+/// recomputes everything — no rework.
 class CricsheetDelivery {
   final int matchIndex;
   final int inningsIndex;
@@ -92,6 +96,13 @@ class CricsheetMatch {
   final Map<String, List<String>> playersByTeam;
   final List<CricsheetDelivery> deliveries;
 
+  /// 'male' / 'female' from info.gender. CRICSHEET-WIRING: the
+  /// dataset mixes men's and women's matches under the SAME team
+  /// names ("Pakistan"), so every squad / H2H / venue query must
+  /// filter by gender — otherwise a men's squad fills up with
+  /// women's players and stars (Babar) get pushed out of the top 20.
+  final String gender;
+
   const CricsheetMatch({
     required this.index,
     required this.dates,
@@ -105,6 +116,7 @@ class CricsheetMatch {
     required this.tossDecision,
     required this.playersByTeam,
     required this.deliveries,
+    this.gender = 'male',
   });
 
   String get date => dates.isEmpty ? '' : dates.first;
@@ -133,16 +145,31 @@ class CricsheetService {
   static const String assetPath = 'assets/cricsheet_sample.json';
   static const String sourceLabel = 'cricsheet';
 
+  /// App-wide cache for the bundled asset: the 25 MB asset is
+  /// parsed ONCE per app run, no matter how many ApiService
+  /// instances screens create. A caller-supplied bundle bypasses
+  /// the cache (test isolation). Never throws: returns an empty
+  /// service when the asset is missing or malformed.
+  static Future<CricsheetService>? _bundledCache;
+
   /// Load the bundled sample asset. Never throws: returns an empty
   /// service when the asset is missing or malformed.
   static Future<CricsheetService> loadBundled({AssetBundle? bundle}) async {
-    try {
-      final b = bundle ?? rootBundle;
-      final text = await b.loadString(assetPath);
-      return parse(text);
-    } catch (_) {
-      return CricsheetService.empty();
+    if (bundle != null) {
+      try {
+        return parse(await bundle.loadString(assetPath));
+      } catch (_) {
+        return CricsheetService.empty();
+      }
     }
+    _bundledCache ??= (() async {
+      try {
+        return parse(await rootBundle.loadString(assetPath));
+      } catch (_) {
+        return CricsheetService.empty();
+      }
+    })();
+    return _bundledCache!;
   }
 
   /// Parse a Cricsheet JSON document: either a single match object
@@ -258,6 +285,7 @@ class CricsheetService {
       dates: ((info['dates'] as List?) ?? []).map((e) => '$e').toList(),
       venue: '${info['venue'] ?? ''}',
       city: '${info['city'] ?? ''}',
+      gender: '${info['gender'] ?? 'male'}',
       matchType: '${info['match_type'] ?? ''}',
       eventName: '${event['name'] ?? ''}',
       teams: teams,
@@ -373,18 +401,31 @@ class CricsheetService {
 
   /// Resolve any name form -> Cricsheet short name.
   /// Accepts: Cricsheet name ("V Kohli"), full name ("Virat Kohli"),
-  /// KingCric id ("p-virat"). Returns null when unknown.
+  /// KingCric id ("p-virat"), and — CRICSHEET-WIRING fix — ANY short
+  /// name present in the loaded dataset ("K Mendis") plus the
+  /// 'cs-...' ids squadForTeams assigns. Previously only the 44
+  /// hard-coded [_identities] resolved, so the other ~1,800 players
+  /// in the 420-match dataset were invisible to every query.
+  /// Returns null when unknown. The last-name fallback stays
+  /// restricted to [_identities] — over 1,847 names it would
+  /// otherwise pick the wrong player.
   String? resolveShortName(String query) {
     final q = query.trim();
     if (q.isEmpty) return null;
     if (_identities.containsKey(q)) return q;
+    if (q.startsWith('cs-')) {
+      final unescaped = q.substring(3).replaceAll('_', ' ');
+      if (_index.knownShorts.contains(unescaped)) return unescaped;
+    }
     for (final e in _identities.entries) {
       if (e.value.id == q) return e.key;
       if (e.value.displayName.toLowerCase() == q.toLowerCase()) {
         return e.key;
       }
     }
-    // Last-name fallback: "Kohli" -> "V Kohli".
+    // Exact short name anywhere in the loaded dataset.
+    if (_index.knownShorts.contains(q)) return q;
+    // Last-name fallback: "Kohli" -> "V Kohli" (identities only).
     final last = q.split(' ').last.toLowerCase();
     for (final e in _identities.entries) {
       if (e.key.toLowerCase().endsWith(last)) return e.key;
@@ -394,153 +435,311 @@ class CricsheetService {
 
   _Identity? _identityFor(String shortName) => _identities[shortName];
 
-  String _teamOf(String shortName) {
-    for (final m in matches) {
+  /// First team (dataset order) the player appeared for.
+  String _teamOf(String shortName) =>
+      _index.playerTeams[shortName]?.firstOrNull ?? '';
+
+  /// Short name for a [Player] built by this service: 'cs-...' ids
+  /// unescape to the short name; `p-*` ids / display names resolve
+  /// through [resolveShortName]. Null when the player is not a
+  /// Cricsheet player (mock / scorecard-only rows).
+  String? shortNameForPlayer(Player p) {
+    if (p.id.startsWith('cs-')) {
+      final unescaped = p.id.substring(3).replaceAll('_', ' ');
+      if (_index.knownShorts.contains(unescaped)) return unescaped;
+      return null;
+    }
+    return resolveShortName(p.name) ?? resolveShortName(p.id);
+  }
+
+  // ---- One-pass index -------------------------------------------------
+
+  /// All per-player aggregates, built in ONE pass over the deliveries.
+  /// The old code rescanned every delivery per player per scope
+  /// (format x opponent x venue x league) — building a 40-player
+  /// squad that way is ~200M operations and hangs the UI. Every
+  /// query below reads from this index; it is built lazily once.
+  _CsIndex? _indexCache;
+  _CsIndex get _index => _indexCache ??= _buildIndex();
+
+  _CsIndex _buildIndex() {
+    final idx = _CsIndex();
+    _BatAgg batAgg(String p, String k) =>
+        (idx.bat[p] ??= {})[k] ??= _BatAgg();
+    _BowlAgg bowlAgg(String p, String k) =>
+        (idx.bowl[p] ??= {})[k] ??= _BowlAgg();
+
+    for (var mi = 0; mi < matches.length; mi++) {
+      final m = matches[mi];
+      final fmt = m.format;
+      final lg = leagueForEvent(m.eventName);
+      final ven = m.venue;
+      idx.venues.add(ven);
+      idx.leagues.add(lg);
+      // XI membership: teams (first-seen order), recency, XI matches.
       for (final e in m.playersByTeam.entries) {
-        if (e.value.contains(shortName)) return e.key;
-      }
-    }
-    return '';
-  }
-
-  // ---- Aggregations ---------------------------------------------------
-
-  /// Per-(player) accumulator over one scope (format / opponent /
-  /// venue / league / overall). Built fresh per query — the dataset
-  /// is small (sample) and the code stays obviously correct; for a
-  /// full all_json.zip load, cache the result in the caller.
-  _BatAcc _batAcc(String shortName, bool Function(CricsheetMatch m,
-          CricsheetDelivery d, String opponent, String venue)
-      scope) {
-    final acc = _BatAcc();
-    final inningsRuns = <String, int>{};
-    final inningsDismissed = <String, int>{};
-    final inningsSeen = <String>{};
-    final matchesSeen = <int>{};
-    for (final m in matches) {
-      for (final d in m.deliveries) {
-        if (d.batter != shortName) continue;
-        final opp = d.bowlingTeam;
-        if (!scope(m, d, opp, m.venue)) continue;
-        matchesSeen.add(m.index);
-        final key = '${m.index}:${d.inningsIndex}';
-        inningsSeen.add(key);
-        if (!d.isWide) {
-          acc.balls += 1;
-          inningsRuns[key] = (inningsRuns[key] ?? 0) + d.batterRuns;
-        } else {
-          inningsRuns[key] = inningsRuns[key] ?? 0;
-        }
-        acc.runs += d.batterRuns;
-        if (d.batterRuns == 4) acc.fours += 1;
-        if (d.batterRuns == 6) acc.sixes += 1;
-        if (d.isWicket && d.playerOut == shortName) {
-          inningsDismissed[key] = 1;
+        final team = e.key;
+        final opp = m.teams.firstWhere((t) => t != team, orElse: () => '');
+        for (final short in e.value) {
+          final teams = idx.playerTeams[short] ??= [];
+          if (!teams.contains(team)) teams.add(team);
+          idx.playerGenders.putIfAbsent(short, () => {}).add(m.gender);
+          idx.playerXiMatches.putIfAbsent(short, () => {}).add(mi);
+          if (idx.playerLastDate[short] == null ||
+              m.date.compareTo(idx.playerLastDate[short]!) > 0) {
+            idx.playerLastDate[short] = m.date;
+            idx.playerLastMatch[short] = mi;
+          }
+          idx.knownShorts.add(short);
+          for (final k in ['all', 'fmt:$fmt', 'opp:$opp', 'ven:$ven', 'lg:$lg']) {
+            batAgg(short, k).matches.add(mi);
+          }
         }
       }
-      // Dismissed without facing (e.g. run out at non-striker's end).
       for (final d in m.deliveries) {
-        if (d.isWicket && d.playerOut == shortName && d.batter != shortName) {
-          final opp = d.bowlingTeam;
-          if (!scope(m, d, opp, m.venue)) continue;
-          matchesSeen.add(m.index);
-          final key = '${m.index}:${d.inningsIndex}';
-          inningsSeen.add(key);
-          inningsRuns[key] = inningsRuns[key] ?? 0;
-          inningsDismissed[key] = 1;
+        final key = '$mi:${d.inningsIndex}';
+        final batKeys = [
+          'all',
+          'fmt:$fmt',
+          'opp:${d.bowlingTeam}',
+          'ven:$ven',
+          'lg:$lg',
+        ];
+        final bowlKeys = [
+          'all',
+          'fmt:$fmt',
+          'opp:${d.battingTeam}',
+          'ven:$ven',
+          'lg:$lg',
+        ];
+        // Batting.
+        final b = d.batter;
+        idx.knownShorts.add(b);
+        for (final k in batKeys) {
+          final a = batAgg(b, k);
+          a.matches.add(mi);
+          a.innings.add(key);
+          a.inningsRuns[key] =
+              (a.inningsRuns[key] ?? 0) + d.batterRuns;
+          if (!d.isWide) a.balls += 1;
+          a.runs += d.batterRuns;
+          if (d.batterRuns == 4) a.fours += 1;
+          if (d.batterRuns == 6) a.sixes += 1;
+          if (d.isWicket && d.playerOut == b) a.dismissedInnings.add(key);
         }
-      }
-    }
-    acc.matches = matchesSeen.length;
-    acc.innings = inningsSeen.length;
-    acc.dismissals = inningsDismissed.values.fold(0, (a, b) => a + b);
-    for (final r in inningsRuns.values) {
-      if (r >= 100) acc.hundreds += 1;
-      if (r >= 50 && r < 100) acc.fifties += 1;
-      if (r > acc.highest) acc.highest = r;
-    }
-    // Matches where the player was in the XI but did not bat still
-    // count as a match played (for career matches).
-    for (final m in matches) {
-      if (m.playersByTeam.values.any((xi) => xi.contains(shortName))) {
-        matchesSeen.add(m.index);
-      }
-    }
-    acc.matches = matchesSeen.length;
-    return acc;
-  }
-
-  _BowlAcc _bowlAcc(String shortName, bool Function(CricsheetMatch m,
-          CricsheetDelivery d, String opponent, String venue)
-      scope) {
-    final acc = _BowlAcc();
-    final perInningsWkts = <String, int>{};
-    final perInningsRuns = <String, int>{};
-    final inningsSeen = <String>{};
-    final matchesSeen = <int>{};
-    for (final m in matches) {
-      for (final d in m.deliveries) {
-        if (d.bowler != shortName) continue;
-        final opp = d.battingTeam;
-        if (!scope(m, d, opp, m.venue)) continue;
-        matchesSeen.add(m.index);
-        final key = '${m.index}:${d.inningsIndex}';
-        inningsSeen.add(key);
-        if (d.isLegalBall) acc.balls += 1;
-        // Byes / leg-byes are not charged to the bowler.
-        acc.runsConceded += d.totalRuns - d.byes - d.legByes;
+        // Dismissed without facing (e.g. run out at non-striker's end).
+        if (d.isWicket && d.playerOut != null && d.playerOut != b) {
+          final o = d.playerOut!;
+          idx.knownShorts.add(o);
+          for (final k in batKeys) {
+            final a = batAgg(o, k);
+            a.matches.add(mi);
+            a.innings.add(key);
+            a.inningsRuns[key] ??= 0;
+            a.dismissedInnings.add(key);
+          }
+        }
+        // Bowling (byes / leg-byes are not charged to the bowler).
+        final bw = d.bowler;
+        idx.knownShorts.add(bw);
+        final charged = d.totalRuns - d.byes - d.legByes;
+        for (final k in bowlKeys) {
+          final a = bowlAgg(bw, k);
+          a.matches.add(mi);
+          a.innings.add(key);
+          if (d.isLegalBall) a.balls += 1;
+          a.runsConceded += charged;
+          a.perInningsRuns[key] =
+              (a.perInningsRuns[key] ?? 0) + charged;
+          if (d.isWicket &&
+              bowlerCreditedKinds.contains(d.wicketKind)) {
+            a.wickets += 1;
+            a.perInningsWkts[key] = (a.perInningsWkts[key] ?? 0) + 1;
+          }
+        }
+        // Recent form.
+        final fb = (idx.form[b] ??= {})[mi] ??= _FormAgg();
+        fb.batted = true;
+        fb.runs += d.batterRuns;
+        if (!d.isWide) fb.balls += 1;
+        final fw = (idx.form[bw] ??= {})[mi] ??= _FormAgg();
+        if (d.isWicket && bowlerCreditedKinds.contains(d.wicketKind)) {
+          fw.wkts += 1;
+        }
+        // Bowler-vs-batter pair.
+        final pair = (idx.pairs[bw] ??= {})[b] ??= _PairAgg();
+        pair.matches.add(mi);
+        if (!d.isWide) pair.balls += 1;
+        pair.runs += charged;
         if (d.isWicket &&
-            d.playerOut != null &&
+            d.playerOut == b &&
             bowlerCreditedKinds.contains(d.wicketKind)) {
-          acc.wickets += 1;
-          perInningsWkts[key] = (perInningsWkts[key] ?? 0) + 1;
+          pair.dismissals += 1;
         }
-        perInningsRuns[key] =
-            (perInningsRuns[key] ?? 0) + (d.totalRuns - d.byes - d.legByes);
+        // Dismissal history for the batter.
+        final bb = (idx.bowlerBallsVs[b] ??= {});
+        if (!d.isWide) bb[bw] = (bb[bw] ?? 0) + 1;
+        if (d.isWicket && d.playerOut == b) {
+          final kind = d.wicketKind ?? '';
+          final bowlerName = _identities[bw]?.displayName ?? bw;
+          String line;
+          if (kind == 'run out') {
+            final f = d.fielders.isEmpty
+                ? ''
+                : ' (${d.fielders.join(' / ')})';
+            line = 'run out$f';
+          } else if (kind == 'bowled') {
+            line = 'b $bowlerName';
+          } else if (kind == 'lbw') {
+            line = 'lbw b $bowlerName';
+          } else if (kind == 'stumped') {
+            final f = d.fielders.isEmpty ? '' : ' ${d.fielders.first}';
+            line = 'st$f b $bowlerName';
+          } else if (kind == 'caught') {
+            final f = d.fielders.isEmpty ? '' : ' ${d.fielders.first}';
+            line = 'c$f b $bowlerName';
+          } else {
+            line = '$kind b $bowlerName';
+          }
+          final counts = (idx.dismissalCounts[b] ??= {});
+          counts[line] = (counts[line] ?? 0) + 1;
+          if (bowlerCreditedKinds.contains(kind)) {
+            final bd = (idx.bowlerDismissalsVs[b] ??= {});
+            bd[bw] = (bd[bw] ?? 0) + 1;
+          }
+        }
       }
     }
-    acc.matches = matchesSeen.length;
-    acc.innings = inningsSeen.length;
-    for (final e in perInningsWkts.entries) {
-      if (e.value >= 5) acc.fiveWickets += 1;
-      final r = perInningsRuns[e.key] ?? 0;
-      if (e.value > acc.bestWkts ||
-          (e.value == acc.bestWkts && r < acc.bestRuns)) {
-        acc.bestWkts = e.value;
-        acc.bestRuns = r;
+    // Per-team squads, most recent first.
+    for (final e in idx.playerTeams.entries) {
+      for (final team in e.value) {
+        (idx.teamPlayers[team] ??= []).add(e.key);
       }
     }
-    return acc;
+    // Squad ranking: most-established first — appearances desc,
+    // recency desc as tie-break. Pure recency drops stars who
+    // missed the last SAMPLED series (the bundled asset is a
+    // monthly stratified sample, not every match — e.g. Babar
+    // missed Pakistan's last sampled series and fell out of a
+    // recency-only top 20). Appearances-first keeps the team's
+    // real core squad; every listed player still has REAL stats.
+    for (final list in idx.teamPlayers.values) {
+      list.sort((a, b2) {
+        final ca = idx.playerXiMatches[a]?.length ?? 0;
+        final cb = idx.playerXiMatches[b2]?.length ?? 0;
+        final c = cb.compareTo(ca);
+        if (c != 0) return c;
+        final da = idx.playerLastDate[a] ?? '';
+        final db = idx.playerLastDate[b2] ?? '';
+        final d = db.compareTo(da);
+        return d != 0 ? d : a.compareTo(b2);
+      });
+    }
+    return idx;
   }
 
-  BattingStats _toBatting(_BatAcc a) => BattingStats(
-        matches: a.matches,
-        innings: a.innings,
-        runs: a.runs,
-        balls: a.balls,
-        fifties: a.fifties,
-        hundreds: a.hundreds,
-        fours: a.fours,
-        sixes: a.sixes,
-        average: a.dismissals > 0
-            ? a.runs / a.dismissals
-            : (a.innings > 0 ? a.runs.toDouble() : 0),
-        strikeRate: a.balls > 0 ? a.runs * 100 / a.balls : 0,
-        highest: a.highest,
-      );
+  BattingStats _battingFromAgg(_BatAgg a) {
+    var fifties = 0;
+    var hundreds = 0;
+    var highest = 0;
+    for (final r in a.inningsRuns.values) {
+      if (r >= 100) {
+        hundreds += 1;
+      } else if (r >= 50) {
+        fifties += 1;
+      }
+      if (r > highest) highest = r;
+    }
+    return BattingStats(
+      matches: a.matches.length,
+      innings: a.innings.length,
+      runs: a.runs,
+      balls: a.balls,
+      fifties: fifties,
+      hundreds: hundreds,
+      fours: a.fours,
+      sixes: a.sixes,
+      average: a.dismissedInnings.isNotEmpty
+          ? a.runs / a.dismissedInnings.length
+          : (a.innings.isNotEmpty ? a.runs.toDouble() : 0),
+      strikeRate: a.balls > 0 ? a.runs * 100 / a.balls : 0,
+      highest: highest,
+    );
+  }
 
-  BowlingStats _toBowling(_BowlAcc a) => BowlingStats(
-        matches: a.matches,
-        innings: a.innings,
-        wickets: a.wickets,
-        balls: a.balls,
-        runsConceded: a.runsConceded,
-        economy: a.balls > 0 ? a.runsConceded * 6 / a.balls : 0,
-        average: a.wickets > 0 ? a.runsConceded / a.wickets : 0,
-        strikeRate: a.wickets > 0 ? a.balls / a.wickets : 0,
-        fiveWickets: a.fiveWickets,
-        best: a.bestWkts > 0 ? '${a.bestWkts}/${a.bestRuns}' : '-',
-      );
+  BowlingStats _bowlingFromAgg(_BowlAgg a) {
+    var fiveWickets = 0;
+    var bestWkts = 0;
+    var bestRuns = 0;
+    for (final e in a.perInningsWkts.entries) {
+      if (e.value >= 5) fiveWickets += 1;
+      final r = a.perInningsRuns[e.key] ?? 0;
+      if (e.value > bestWkts ||
+          (e.value == bestWkts && r < bestRuns)) {
+        bestWkts = e.value;
+        bestRuns = r;
+      }
+    }
+    return BowlingStats(
+      matches: a.matches.length,
+      innings: a.innings.length,
+      wickets: a.wickets,
+      balls: a.balls,
+      runsConceded: a.runsConceded,
+      economy: a.balls > 0 ? a.runsConceded * 6 / a.balls : 0,
+      average: a.wickets > 0 ? a.runsConceded / a.wickets : 0,
+      strikeRate: a.wickets > 0 ? a.balls / a.wickets : 0,
+      fiveWickets: fiveWickets,
+      best: bestWkts > 0 ? '$bestWkts/$bestRuns' : '-',
+    );
+  }
+
+  /// Team-name equality for H2H / squad lookups: compare BASE
+  /// names (a trailing " Women" / " Men" suffix is stripped —
+  /// Cricsheet stores "Pakistan" for both genders and separates
+  /// them with [CricsheetMatch.gender], while providers write
+  /// "Pakistan Women"). Gender separation happens via the
+  /// [gender] parameter, never by name — "Pakistan Women" must NOT
+  /// silently match the men's "Pakistan" squad.
+  static String _baseTeamName(String name) {
+    var n = name.trim();
+    final lower = n.toLowerCase();
+    for (final suffix in [' women', ' men']) {
+      if (lower.endsWith(suffix)) {
+        n = n.substring(0, n.length - suffix.length).trim();
+        break;
+      }
+    }
+    return n;
+  }
+
+  static bool _sameTeam(String a, String b) =>
+      _baseTeamName(a).toLowerCase() ==
+      _baseTeamName(b).toLowerCase();
+
+  /// Gender inferred from a provider team name: 'female' when the
+  /// name ends in " Women", otherwise 'male' (providers write bare
+  /// names for men's teams). An explicit [gender] argument always
+  /// wins over inference.
+  static String _genderForTeam(String teamName, String? gender) {
+    if (gender != null) return gender;
+    return teamName.trim().toLowerCase().endsWith(' women')
+        ? 'female'
+        : 'male';
+  }
+
+  /// Cricsheet team key for a provider team name, or null when the
+  /// dataset has no such team (franchise sides, leagues outside
+  /// the bundled internationals). Callers fall back to mock /
+  /// scorecard data — never invent a squad.
+  String? _findTeamKey(String teamName) {
+    final base = _baseTeamName(teamName);
+    if (_index.teamPlayers.containsKey(base)) return base;
+    for (final k in _index.teamPlayers.keys) {
+      if (_sameTeam(k, base)) return k;
+    }
+    return null;
+  }
 
   // ---- Public queries --------------------------------------------------
 
@@ -553,29 +752,34 @@ class CricsheetService {
   }
 
   Player? playerByShortName(String shortName) {
+    final idx = _index;
+    // CRICSHEET-WIRING: any name in the dataset builds a profile —
+    // the old code returned null for everyone outside the 44-name
+    // identity map. Display name is the full name when known,
+    // otherwise the Cricsheet short name as-is (never invented).
+    if (!idx.knownShorts.contains(shortName)) return null;
     final ident = _identityFor(shortName);
-    if (ident == null) return null;
     final team = _teamOf(shortName);
-    final played = matches.any((m) =>
-        m.playersByTeam.values.any((xi) => xi.contains(shortName)) ||
-        m.deliveries.any(
-            (d) => d.batter == shortName || d.bowler == shortName));
-    if (!played) return null;
+    final batMap = idx.bat[shortName] ?? {};
+    final bowlMap = idx.bowl[shortName] ?? {};
 
     final battingByFormat = <String, BattingStats>{};
     final bowlingByFormat = <String, BowlingStats>{};
     for (final fmt in ['Test', 'ODI', 'T20', 'T10']) {
-      final bat = _batAcc(
-          shortName, (m, d, o, v) => m.format == fmt);
-      if (bat.innings > 0 || bat.matches > 0) {
-        battingByFormat[fmt] = _toBatting(bat);
+      final bat = batMap['fmt:$fmt'];
+      // WIRING correctness fix: `matches` is now scope-aware (XI
+      // matches IN this format). The old per-scope accumulator
+      // added EVERY XI match to every format, inflating
+      // battingOverall().matches across formats.
+      if (bat != null &&
+          (bat.innings.isNotEmpty || bat.matches.isNotEmpty)) {
+        battingByFormat[fmt] = _battingFromAgg(bat);
       }
-      final bowl = _bowlAcc(
-          shortName, (m, d, o, v) => m.format == fmt);
-      if (bowl.innings > 0) bowlingByFormat[fmt] = _toBowling(bowl);
+      final bowl = bowlMap['fmt:$fmt'];
+      if (bowl != null && bowl.innings.isNotEmpty) {
+        bowlingByFormat[fmt] = _bowlingFromAgg(bowl);
+      }
     }
-    // If the player never batted, keep an empty-but-present map so
-    // the profile still shows bowling. (BattingStats defaults to 0.)
     final battingVsOpponent = <String, BattingStats>{};
     final bowlingVsOpponent = <String, BowlingStats>{};
     final opponents = <String>{};
@@ -585,38 +789,52 @@ class CricsheetService {
       }
     }
     for (final opp in opponents) {
-      final bat = _batAcc(
-          shortName, (m, d, o, v) => o == opp);
-      if (bat.innings > 0) battingVsOpponent[opp] = _toBatting(bat);
-      final bowl = _bowlAcc(
-          shortName, (m, d, o, v) => o == opp);
-      if (bowl.innings > 0) bowlingVsOpponent[opp] = _toBowling(bowl);
+      final bat = batMap['opp:$opp'];
+      if (bat != null && bat.innings.isNotEmpty) {
+        battingVsOpponent[opp] = _battingFromAgg(bat);
+      }
+      final bowl = bowlMap['opp:$opp'];
+      if (bowl != null && bowl.innings.isNotEmpty) {
+        bowlingVsOpponent[opp] = _bowlingFromAgg(bowl);
+      }
     }
     final battingByVenue = <String, BattingStats>{};
-    for (final m in matches) {
-      if (m.venue.isEmpty) continue;
-      final bat = _batAcc(
-          shortName, (mm, d, o, v) => v == m.venue);
-      if (bat.innings > 0) battingByVenue[m.venue] = _toBatting(bat);
+    for (final venue in idx.venues) {
+      if (venue.isEmpty) continue;
+      final bat = batMap['ven:$venue'];
+      if (bat != null && bat.innings.isNotEmpty) {
+        battingByVenue[venue] = _battingFromAgg(bat);
+      }
     }
     final battingByLeague = <String, BattingStats>{};
-    for (final m in matches) {
-      final league = leagueForEvent(m.eventName);
-      final bat = _batAcc(shortName,
-          (mm, d, o, v) => leagueForEvent(mm.eventName) == league);
-      if (bat.innings > 0) battingByLeague[league] = _toBatting(bat);
+    for (final league in idx.leagues) {
+      final bat = batMap['lg:$league'];
+      if (bat != null && bat.innings.isNotEmpty) {
+        battingByLeague[league] = _battingFromAgg(bat);
+      }
     }
 
-    final playedMatches = matches
-        .where((m) => m.playersByTeam.values
-            .any((xi) => xi.contains(shortName)))
-        .toList();
+    // Role: curated when known, otherwise inferred from what the
+    // player actually did in the data — never guessed from a name.
+    String role;
+    if (ident != null) {
+      role = ident.role;
+    } else {
+      final batted = (batMap['all']?.balls ?? 0) > 0 ||
+          (batMap['all']?.innings.isNotEmpty ?? false);
+      final bowled = (bowlMap['all']?.balls ?? 0) > 0;
+      role = bowled && batted
+          ? 'All-rounder'
+          : bowled
+              ? 'Bowler'
+              : 'Batter';
+    }
 
     return Player(
-      id: ident.id,
-      name: ident.displayName,
+      id: ident?.id ?? 'cs-${shortName.replaceAll(' ', '_')}',
+      name: ident?.displayName ?? shortName,
       team: team,
-      role: ident.role,
+      role: role,
       battingStyle: '',
       bowlingStyle: '',
       country: team,
@@ -632,7 +850,7 @@ class CricsheetService {
       dataComplete: true,
       lastUpdated: DateTime.now(),
       source: sourceLabel,
-      sourceMatches: playedMatches.length,
+      sourceMatches: idx.playerXiMatches[shortName]?.length ?? 0,
     );
   }
 
@@ -642,36 +860,20 @@ class CricsheetService {
       {required String bowler, required String batter}) {
     final bowlerShort = resolveShortName(bowler) ?? bowler;
     final batterShort = resolveShortName(batter) ?? batter;
-    var balls = 0;
-    var runs = 0;
-    var dismissals = 0;
-    final matchesSeen = <int>{};
-    for (final m in matches) {
-      var seen = false;
-      for (final d in m.deliveries) {
-        if (d.bowler != bowlerShort || d.batter != batterShort) continue;
-        seen = true;
-        if (!d.isWide) balls += 1;
-        runs += d.totalRuns - d.byes - d.legByes;
-        if (d.isWicket &&
-            d.playerOut == batterShort &&
-            bowlerCreditedKinds.contains(d.wicketKind)) {
-          dismissals += 1;
-        }
-      }
-      if (seen) matchesSeen.add(m.index);
-    }
+    final pair = _index.pairs[bowlerShort]?[batterShort];
     return Matchup(
-      bowlerId: _identities[bowlerShort]?.id ?? bowlerShort,
+      bowlerId: _identities[bowlerShort]?.id ??
+          'cs-${bowlerShort.replaceAll(' ', '_')}',
       bowlerName:
           _identities[bowlerShort]?.displayName ?? bowlerShort,
-      batterId: _identities[batterShort]?.id ?? batterShort,
+      batterId: _identities[batterShort]?.id ??
+          'cs-${batterShort.replaceAll(' ', '_')}',
       batterName:
           _identities[batterShort]?.displayName ?? batterShort,
-      matches: matchesSeen.length,
-      balls: balls,
-      runs: runs,
-      dismissals: dismissals,
+      matches: pair?.matches.length ?? 0,
+      balls: pair?.balls ?? 0,
+      runs: pair?.runs ?? 0,
+      dismissals: pair?.dismissals ?? 0,
     );
   }
 
@@ -679,67 +881,26 @@ class CricsheetService {
   /// most balls first. Used for the profile "Bowler vs Batter" section.
   List<Matchup> matchupsForBatter(String batter) {
     final batterShort = resolveShortName(batter) ?? batter;
-    final bowlers = <String>{};
-    for (final m in matches) {
-      for (final d in m.deliveries) {
-        if (d.batter == batterShort) bowlers.add(d.bowler);
+    final out = <Matchup>[];
+    for (final e in _index.pairs.entries) {
+      final pair = e.value[batterShort];
+      if (pair != null && pair.balls > 0) {
+        out.add(matchup(bowler: e.key, batter: batterShort));
       }
     }
-    final out = bowlers
-        .map((b) => matchup(bowler: b, batter: batterShort))
-        .where((x) => x.balls > 0)
-        .toList();
     out.sort((a, b) => b.balls.compareTo(a.balls));
     return out.take(6).toList();
   }
 
-  /// "c X b Y — N times" lines, most frequent first, plus one
-  /// "Never dismissed by Z" line for the bowler with most balls and
-  /// zero dismissals (min 12 balls), when one exists.
+  /// "c X b Y — N times" lines, plus one "Never dismissed by Z"
+  /// line for the bowler with most balls and zero dismissals
+  /// (min 12 balls), when one exists.
   List<String> dismissalHistoryFor(String batter) {
     final batterShort = resolveShortName(batter) ?? batter;
-    final counts = <String, int>{};
-    final bowlerBalls = <String, int>{};
-    final bowlerDismissals = <String, int>{};
-    for (final m in matches) {
-      for (final d in m.deliveries) {
-        if (d.batter != batterShort) continue;
-        if (!d.isWide) {
-          bowlerBalls[d.bowler] = (bowlerBalls[d.bowler] ?? 0) + 1;
-        }
-        if (d.isWicket && d.playerOut == batterShort) {
-          final kind = d.wicketKind ?? '';
-          final bowlerName =
-              _identities[d.bowler]?.displayName ?? d.bowler;
-          String line;
-          if (kind == 'run out') {
-            final f = d.fielders.isEmpty
-                ? ''
-                : ' (${d.fielders.join(' / ')})';
-            line = 'run out$f';
-          } else if (kind == 'bowled') {
-            line = 'b $bowlerName';
-          } else if (kind == 'lbw') {
-            line = 'lbw b $bowlerName';
-          } else if (kind == 'stumped') {
-            final f = d.fielders.isEmpty ? '' : ' ${d.fielders.first}';
-            line = 'st$f b $bowlerName';
-          } else if (kind == 'caught') {
-            final f = d.fielders.isEmpty
-                ? ''
-                : ' ${d.fielders.first}';
-            line = 'c$f b $bowlerName';
-          } else {
-            line = '$kind b $bowlerName';
-          }
-          counts[line] = (counts[line] ?? 0) + 1;
-          if (bowlerCreditedKinds.contains(kind)) {
-            bowlerDismissals[d.bowler] =
-                (bowlerDismissals[d.bowler] ?? 0) + 1;
-          }
-        }
-      }
-    }
+    final idx = _index;
+    final counts = idx.dismissalCounts[batterShort] ?? {};
+    final bowlerBalls = idx.bowlerBallsVs[batterShort] ?? {};
+    final bowlerDismissals = idx.bowlerDismissalsVs[batterShort] ?? {};
     final lines = counts.entries
         .map((e) => '${e.key} — ${e.value} time${e.value == 1 ? '' : 's'}')
         .toList();
@@ -764,29 +925,16 @@ class CricsheetService {
   List<FormEntry> recentFormFor(String player) {
     final short = resolveShortName(player) ?? player;
     final team = _teamOf(short);
+    final formMap = _index.form[short];
+    if (formMap == null) return [];
     final entries = <FormEntry>[];
-    final sorted = [...matches]
+    final sorted = formMap.keys
+        .map((i) => matches[i])
+        .toList()
       ..sort((a, b) => b.date.compareTo(a.date));
     for (final m in sorted) {
-      final inXi = m.playersByTeam.values.any((xi) => xi.contains(short));
-      if (!inXi) continue;
-      var runs = 0;
-      var balls = 0;
-      var wkts = 0;
-      var batted = false;
-      for (final d in m.deliveries) {
-        if (d.batter == short) {
-          batted = true;
-          runs += d.batterRuns;
-          if (!d.isWide) balls += 1;
-        }
-        if (d.bowler == short &&
-            d.isWicket &&
-            bowlerCreditedKinds.contains(d.wicketKind)) {
-          wkts += 1;
-        }
-      }
-      if (!batted && wkts == 0) continue;
+      final fa = formMap[m.index]!;
+      if (!fa.batted && fa.wkts == 0) continue;
       final opp = m.teams.firstWhere((t) => t != team, orElse: () => '');
       String result = 'NR';
       if (m.winner.isNotEmpty) {
@@ -796,9 +944,9 @@ class CricsheetService {
         matchLabel: m.teams.join(' vs '),
         opponent: opp,
         format: m.format,
-        runs: runs,
-        balls: balls,
-        wickets: wkts,
+        runs: fa.runs,
+        balls: fa.balls,
+        wickets: fa.wkts,
         result: result,
       ));
       if (entries.length >= 5) break;
@@ -807,15 +955,26 @@ class CricsheetService {
   }
 
   /// Team H2H: {matches, teamAWins, teamBWins, noResult}.
-  Map<String, int> teamH2H(String teamA, String teamB) {
+  /// Optional [format] restricts to one format ('ODI', 'T20',
+  /// ...). Optional [gender] restricts to men's / women's
+  /// meetings — pass it whenever the calling match knows its
+  /// gender, otherwise men's and women's meetings are pooled
+  /// (legacy behaviour, kept for callers without match context).
+  Map<String, int> teamH2H(String teamA, String teamB,
+      {String? format, String? gender}) {
     var played = 0;
     var aWins = 0;
     var bWins = 0;
+    final fmt = format == null ? null : normalizeFormat(format);
     for (final m in matches) {
-      if (!m.teams.contains(teamA) || !m.teams.contains(teamB)) continue;
+      if (fmt != null && m.format != fmt) continue;
+      if (gender != null && m.gender != gender) continue;
+      final hasA = m.teams.any((t) => _sameTeam(t, teamA));
+      final hasB = m.teams.any((t) => _sameTeam(t, teamB));
+      if (!hasA || !hasB) continue;
       played += 1;
-      if (m.winner == teamA) aWins += 1;
-      if (m.winner == teamB) bWins += 1;
+      if (m.winner.isNotEmpty && _sameTeam(m.winner, teamA)) aWins += 1;
+      if (m.winner.isNotEmpty && _sameTeam(m.winner, teamB)) bWins += 1;
     }
     return {
       'matches': played,
@@ -823,6 +982,189 @@ class CricsheetService {
       'teamBWins': bWins,
       'noResult': played - aWins - bWins,
     };
+  }
+
+  /// H2H with the format (and gender) of the current match — the
+  /// Venue & H2H tab calls this. Same result shape as [teamH2H].
+  Map<String, int> teamHeadToHead(String teamA, String teamB,
+          {String? format, String? gender}) =>
+      teamH2H(teamA, teamB, format: format, gender: gender);
+
+  /// Squad for both teams of a match, from the bundled Cricsheet
+  /// dataset — players who appeared for that team, ranked by
+  /// appearances IN THE MATCH'S FORMAT first (then overall
+  /// appearances, then recency), capped at [limit] per team.
+  /// Format-aware ranking matters because the dataset skews T20
+  /// (303 T20 / 92 ODI / 25 Test): ranking by total appearances
+  /// would fill an ODI squad with T20I regulars and drop ODI-only
+  /// stars (Kohli plays only ODIs now — 3 sampled matches, all
+  /// ODI). Every player is a FULL
+  /// [Player] with REAL computed stats (overall + this-format +
+  /// vs-opponent + recent form). Keyed by the team names passed
+  /// in, so callers can look up by match team name. Empty list
+  /// for a team the dataset has no players for (franchise sides,
+  /// leagues outside the bundled internationals) — callers fall
+  /// back to mock / scorecard data, never invent a squad.
+  /// [format] is accepted for API stability; membership is by
+  /// recency across formats (a squad is the team's recent XI pool,
+  /// and per-format splits live on each [Player]).
+  Map<String, List<Player>> squadForTeams(String teamA, String teamB,
+      {String? format,
+      String? opponent,
+      int limit = 20,
+      String? gender}) {
+    final out = <String, List<Player>>{};
+    final fmt = format == null ? null : normalizeFormat(format);
+    for (final team in [teamA, teamB]) {
+      final key = _findTeamKey(team);
+      final g = _genderForTeam(team, gender);
+      final shorts = key == null
+          ? const <String>[]
+          : _index.teamPlayers[key] ?? const <String>[];
+      // Gender filter: a men's squad must not contain women's
+      // players (and vice versa) — the dataset stores both under
+      // the same team name.
+      final filtered = shorts
+          .where((s) => (_index.playerGenders[s] ?? {}).contains(g))
+          .toList();
+      // Format-aware ranking: appearances in THIS format first,
+      // then overall appearances, then recency. teamPlayers is
+      // pre-sorted by overall appearances; re-sort per call so a
+      // T20I-heavy pool does not crowd out ODI/Test specialists.
+      if (fmt != null) {
+        int fmtApps(String s) =>
+            _index.bat[s]?['fmt:$fmt']?.matches.length ?? 0;
+        filtered.sort((a, b2) {
+          final c = fmtApps(b2).compareTo(fmtApps(a));
+          if (c != 0) return c;
+          final oa = _index.playerXiMatches[a]?.length ?? 0;
+          final ob = _index.playerXiMatches[b2]?.length ?? 0;
+          final d = ob.compareTo(oa);
+          if (d != 0) return d;
+          return a.compareTo(b2);
+        });
+      }
+      out[team] = filtered
+          .take(limit)
+          .map(playerByShortName)
+          .whereType<Player>()
+          .toList();
+    }
+    return out;
+  }
+
+  /// Venue stats computed from bundled matches at [venueName]
+  /// (fuzzy match: "Rawalpindi Cricket Stadium, Rawalpindi" matches
+  /// the dataset's "Rawalpindi Cricket Stadium"). Null when no
+  /// bundled match was played there. Pitch / weather are NOT in
+  /// Cricsheet — the Venue tab keeps "Not available from free
+  /// providers yet" for those, never faked.
+  VenueStats? venueStats(String venueName, {String? gender}) {
+    final matched = matches
+        .where((m) =>
+            _venueMatches(m.venue, venueName) &&
+            (gender == null || m.gender == gender))
+        .toList();
+    if (matched.isEmpty) return null;
+    var firstSum = 0;
+    var firstCount = 0;
+    var secondSum = 0;
+    var secondCount = 0;
+    var highest = 0;
+    var batFirstWins = 0;
+    var decided = 0;
+    String city = '';
+    for (final m in matched) {
+      if (city.isEmpty) city = m.city;
+      final totals = <int, int>{};
+      String? firstBattingTeam;
+      for (final d in m.deliveries) {
+        totals[d.inningsIndex] =
+            (totals[d.inningsIndex] ?? 0) + d.totalRuns;
+        if (d.inningsIndex == 0) firstBattingTeam ??= d.battingTeam;
+      }
+      final first = totals[0];
+      if (first != null) {
+        firstSum += first;
+        firstCount += 1;
+        if (first > highest) highest = first;
+      }
+      final second = totals[1];
+      if (second != null) {
+        secondSum += second;
+        secondCount += 1;
+        if (second > highest) highest = second;
+      }
+      if (m.winner.isNotEmpty && firstBattingTeam != null) {
+        decided += 1;
+        if (_sameTeam(m.winner, firstBattingTeam)) batFirstWins += 1;
+      }
+    }
+    return VenueStats(
+      venue: matched.first.venue,
+      city: city,
+      matches: matched.length,
+      avgFirstInnings:
+          firstCount > 0 ? firstSum / firstCount : 0,
+      avgSecondInnings:
+          secondCount > 0 ? secondSum / secondCount : 0,
+      highestTotal: highest,
+      batFirstWinPct: decided > 0 ? batFirstWins * 100 / decided : 0,
+    );
+  }
+
+  static String _normVenue(String s) => s
+      .toLowerCase()
+      .replaceAll(RegExp(r'[^a-z0-9 ]'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
+  static bool _venueMatches(String venue, String query) {
+    final a = _normVenue(venue);
+    final b = _normVenue(query);
+    if (a.isEmpty || b.isEmpty) return false;
+    if (a == b || a.contains(b) || b.contains(a)) return true;
+    final at = a.split(' ').toSet();
+    final bt = b.split(' ').toSet();
+    final inter = at.intersection(bt).length;
+    final minLen = at.length < bt.length ? at.length : bt.length;
+    return minLen > 0 && inter / minLen >= 0.75;
+  }
+
+  /// Cross-squad bowler-vs-batter matchups from Cricsheet:
+  /// bowler in one squad, batter in the other only (same-team
+  /// pairs are not head-to-head). Sorted dismissals desc, then
+  /// balls desc. Used by the Venue & H2H tab — the old path read
+  /// matchups off mock players' stored lists, which were empty
+  /// for real matches.
+  List<Matchup> crossSquadMatchups(
+      List<Player> squadA, List<Player> squadB,
+      {int limit = 5}) {
+    final a = squadA
+        .map(shortNameForPlayer)
+        .whereType<String>()
+        .toSet();
+    final b = squadB
+        .map(shortNameForPlayer)
+        .whereType<String>()
+        .toSet();
+    if (a.isEmpty || b.isEmpty) return [];
+    final out = <Matchup>[];
+    for (final bowler in {...a, ...b}) {
+      for (final batter in {...a, ...b}) {
+        if (bowler == batter) continue;
+        final cross = (a.contains(bowler) && b.contains(batter)) ||
+            (b.contains(bowler) && a.contains(batter));
+        if (!cross) continue;
+        final m = matchup(bowler: bowler, batter: batter);
+        if (m.dismissals > 0 || m.balls >= 12) out.add(m);
+      }
+    }
+    out.sort((x, y) {
+      final d = y.dismissals.compareTo(x.dismissals);
+      return d != 0 ? d : y.balls.compareTo(x.balls);
+    });
+    return out.take(limit).toList();
   }
 
   /// Partnerships for one innings: "A + B — R (balls)", biggest first.
@@ -897,26 +1239,82 @@ class CricsheetService {
   }
 }
 
-class _BatAcc {
-  int matches = 0;
-  int innings = 0;
-  int runs = 0;
-  int balls = 0;
-  int fifties = 0;
-  int hundreds = 0;
-  int fours = 0;
-  int sixes = 0;
-  int dismissals = 0;
-  int highest = 0;
+/// Venue stats computed from bundled Cricsheet matches.
+/// All numbers are REAL counts over the matched matches — never
+/// invented. Pitch / weather are not in Cricsheet and are not here.
+class VenueStats {
+  final String venue;
+  final String city;
+  final int matches;
+  final double avgFirstInnings;
+  final double avgSecondInnings;
+  final int highestTotal;
+  final double batFirstWinPct;
+  const VenueStats({
+    required this.venue,
+    required this.city,
+    required this.matches,
+    required this.avgFirstInnings,
+    required this.avgSecondInnings,
+    required this.highestTotal,
+    required this.batFirstWinPct,
+  });
 }
 
-class _BowlAcc {
-  int matches = 0;
-  int innings = 0;
-  int wickets = 0;
+/// One-pass index over the loaded matches. Split keys:
+/// 'all', 'fmt:<Format>', 'opp:<Team>', 'ven:<Venue>', 'lg:<League>'.
+class _CsIndex {
+  final Map<String, Map<String, _BatAgg>> bat = {};
+  final Map<String, Map<String, _BowlAgg>> bowl = {};
+  final Map<String, Map<int, _FormAgg>> form = {};
+  final Map<String, Map<String, _PairAgg>> pairs = {};
+  final Map<String, Map<String, int>> dismissalCounts = {};
+  final Map<String, Map<String, int>> bowlerBallsVs = {};
+  final Map<String, Map<String, int>> bowlerDismissalsVs = {};
+  final Map<String, List<String>> playerTeams = {};
+  final Map<String, Set<String>> playerGenders = {};
+  final Map<String, Set<int>> playerXiMatches = {};
+  final Map<String, String> playerLastDate = {};
+  final Map<String, int> playerLastMatch = {};
+  final Map<String, List<String>> teamPlayers = {};
+  final Set<String> knownShorts = {};
+  final Set<String> venues = {};
+  final Set<String> leagues = {};
+}
+
+class _BatAgg {
+  /// Match indices where the player batted OR was in the XI
+  /// (scope-aware: only matches in this split).
+  final Set<int> matches = {};
+  final Set<String> innings = {};
+  final Map<String, int> inningsRuns = {};
+  final Set<String> dismissedInnings = {};
+  int runs = 0;
+  int balls = 0;
+  int fours = 0;
+  int sixes = 0;
+}
+
+class _BowlAgg {
+  final Set<int> matches = {};
+  final Set<String> innings = {};
   int balls = 0;
   int runsConceded = 0;
-  int fiveWickets = 0;
-  int bestWkts = 0;
-  int bestRuns = 0;
+  int wickets = 0;
+  final Map<String, int> perInningsWkts = {};
+  final Map<String, int> perInningsRuns = {};
+}
+
+class _FormAgg {
+  bool batted = false;
+  int runs = 0;
+  int balls = 0;
+  int wkts = 0;
+}
+
+class _PairAgg {
+  int balls = 0;
+  int runs = 0;
+  int dismissals = 0;
+  final Set<int> matches = {};
 }
