@@ -51,7 +51,30 @@ abstract class CricketProvider {
   /// return the basic profile with dataComplete=false and the
   /// orchestrator keeps the curated dataset for the deep sections,
   /// labelled as such. Never present partial data as complete.
+  ///
+  /// [playerId] MUST be the provider's own player id (for CricAPI, the
+  /// NUMERIC id from [resolvePlayerId]) — never a display name. The
+  /// orchestrator resolves names to ids before calling this.
   Future<Player?> fetchPlayer(String playerId);
+
+  /// Resolve a display name ("Virat Kohli") to this provider's player
+  /// id, or null when the provider cannot resolve it. Providers that
+  /// have no lookup return null. Never throws, never returns a
+  /// wrong-player id: a match must be verified against the returned
+  /// name before its id is used.
+  Future<String?> resolvePlayerId(String name);
+
+  /// Server-side quota remaining as reported by the provider's last
+  /// response (`info.hitsLeft` for CricAPI), or null when the provider
+  /// does not report it. In-memory hit counters are NOT a substitute:
+  /// the server counts every hit, including ones from other sessions.
+  int? get serverHitsLeft;
+
+  /// True when the provider's last response said the server-side
+  /// quota is exhausted (hitsLeft == 0 or an explicit quota error).
+  /// The orchestrator stops calling such a provider instead of
+  /// burning calls that can only return quota errors.
+  bool get quotaExhausted;
 
   /// True when the provider accepts its configured key (1 cheap call).
   /// Keyless providers return true when their base URL answers.
