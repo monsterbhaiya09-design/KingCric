@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../../models/match.dart';
 import '../../models/player.dart';
@@ -139,6 +140,7 @@ class EliteSportProvider implements CricketProvider {
       ],
       result: statusRaw,
       lastUpdated: DateTime.now(),
+      source: 'EliteSport',
     );
   }
 
@@ -155,6 +157,7 @@ class EliteSportProvider implements CricketProvider {
     if (body == null) return null;
     final parsed =
         _list(body).map(_matchFromGeneric).whereType<CricketMatch>().toList();
+    debugPrint('KingCric [EliteSport] fetchMatches: kept=${parsed.length}');
     if (parsed.isNotEmpty) return parsed;
     // No live matches: try fixtures for upcoming.
     final fix = await _getJson('/fixtures');
@@ -174,6 +177,7 @@ class EliteSportProvider implements CricketProvider {
         .where((m) =>
             m.status == MatchStatus.upcoming && !m.isEffectivelyLive)
         .toList();
+    debugPrint('KingCric [EliteSport] fetchUpcoming: received=${parsed.length} kept=${upcoming.length}');
     return upcoming.isEmpty ? null : upcoming;
   }
 
@@ -194,6 +198,17 @@ class EliteSportProvider implements CricketProvider {
     // No series-list endpoint documented; series detail needs an id.
     return null;
   }
+
+  @override
+  /// FIX-7: no name->id lookup, no server quota reporting.
+  @override
+  Future<String?> resolvePlayerId(String name) async => null;
+
+  @override
+  int? get serverHitsLeft => null;
+
+  @override
+  bool get quotaExhausted => false;
 
   @override
   Future<Player?> fetchPlayer(String playerId) async {
