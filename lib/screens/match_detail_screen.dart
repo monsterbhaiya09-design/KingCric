@@ -2,17 +2,50 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/innings.dart';
 import '../models/match.dart';
+import '../models/player.dart';
+import '../models/venue.dart';
 import '../services/api_service.dart';
 import '../services/prediction_engine.dart';
 import '../utils/app_theme.dart';
 import '../utils/strings.dart';
-import '../models/player.dart';
 import '../widgets/h2h_card.dart';
 import '../widgets/over_graph.dart';
-import '../widgets/player_card.dart';
 import '../widgets/prediction_card.dart';
 import '../widgets/premium_widgets.dart';
+import '../widgets/squad_player_card.dart';
 import 'player_profile_screen.dart';
+
+/// Top bowler-vs-batter matchups across the two squads, sorted by
+/// dismissals desc, then balls desc. Only matchups where the bowler
+/// is in one squad and the batter in the other count — same-team
+/// pairs are not "head-to-head". Pure function, unit-tested.
+List<Matchup> topPlayerMatchups(
+    List<Player> squadA, List<Player> squadB, {int limit = 5}) {
+  final aIds = squadA.map((p) => p.id).toSet();
+  final bIds = squadB.map((p) => p.id).toSet();
+  final seen = <String>{};
+  final out = <Matchup>[];
+  for (final p in [...squadA, ...squadB]) {
+    for (final m in p.matchups) {
+      // Matchup is stored on the BATTER: m.bowlerId is the bowler,
+      // m.batterId is this player. Keep only cross-squad pairs.
+      final bowlerInA = aIds.contains(m.bowlerId);
+      final bowlerInB = bIds.contains(m.bowlerId);
+      final batterInA = aIds.contains(m.batterId);
+      final batterInB = bIds.contains(m.batterId);
+      final cross = (bowlerInA && batterInB) || (bowlerInB && batterInA);
+      if (!cross) continue;
+      final key = '${m.bowlerId}|${m.batterId}';
+      if (!seen.add(key)) continue;
+      if (m.dismissals > 0 || m.balls >= 12) out.add(m);
+    }
+  }
+  out.sort((x, y) {
+    final d = y.dismissals.compareTo(x.dismissals);
+    return d != 0 ? d : y.balls.compareTo(x.balls);
+  });
+  return out.take(limit).toList();
+}
 
 /// Cricket-overs helpers (top-level so they are unit-testable).
 ///
@@ -95,13 +128,171 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   // Future in build re-fires the fetch every frame, burning quota
   // and flickering the Squad / Prediction tabs).
   late final Future<List<Player>> _playersFuture;
+  late final Future<List<Venue>> _venuesFuture;
+  bool _refreshingDetail = false;
 
   @override
   void initState() {
     super.initState();
     _match = widget.match;
-    _tabs = TabController(length: 4, vsync: this);
+    // MATCH-CENTRIC tabs: Live/Scorecard | Squad | Venue+H2H | Prediction.
+    _tabs = TabController(length: 5, vsync: this);
     _playersFuture = ApiService().fetchPlayers();
+    _venuesFuture = ApiService().fetchVenues();
+    // AUTO-FETCH on open (was manual-Retry only): the list entry from
+    // /currentMatches carries NO innings, so without this call every
+    // live match opened with an empty scorecard. Non-force: respects
+    // the 10-min live / 60-min completed cache, so re-opening the
+    // same match costs no quota. Retry buttons use force: true.
+    _refreshDetail(force: false);
+  }
+
+  /// Merge a fetched scorecard into the list entry: innings/scores
+  /// from the detail win when non-empty; squad/venue/toss from
+  /// whichever side has them. A wholesale replace would WIPE the
+  /// list entry's squad ids (CricAPI /cricketScore returns no squad
+  /// list), emptying the Squad tab that was already populated.
+  static CricketMatch _mergeDetail(CricketMatch base, CricketMatch detail) {
+    return CricketMatch(
+      id: base.id,
+      teamA: base.teamA,
+      teamB: base.teamB,
+      format: base.format,
+      league: base.league,
+      venueId: base.venueId,
+      venueName:
+          detail.venueName.isNotEmpty ? detail.venueName : base.venueName,
+      startTime: base.startTime,
+      status: detail.status,
+      scores: detail.scores.isNotEmpty ? detail.scores : base.scores,
+      result: detail.result.isNotEmpty ? detail.result : base.result,
+      toss: detail.toss.isNotEmpty ? detail.toss : base.toss,
+      squadA: base.squadA.isNotEmpty ? base.squadA : detail.squadA,
+      squadB: base.squadB.isNotEmpty ? base.squadB : detail.squadB,
+      innings: detail.innings.isNotEmpty ? detail.innings : base.innings,
+      commentary:
+          detail.commentary.isNotEmpty ? detail.commentary : base.commentary,
+      currentBatter: detail.currentBatter.isNotEmpty
+          ? detail.currentBatter
+          : base.currentBatter,
+      currentBowler: detail.currentBowler.isNotEmpty
+          ? detail.currentBowler
+          : base.currentBowler,
+      lastBall:
+          detail.lastBall.isNotEmpty ? detail.lastBall : base.lastBall,
+      teamAWinsH2H: detail.teamAWinsH2H != 0
+          ? detail.teamAWinsH2H
+          : base.teamAWinsH2H,
+      teamBWinsH2H: detail.teamBWinsH2H != 0
+          ? detail.teamBWinsH2H
+          : base.teamBWinsH2H,
+      totalH2H:
+          detail.totalH2H != 0 ? detail.totalH2H : base.totalH2H,
+      lastUpdated: detail.lastUpdated ?? base.lastUpdated,
+      umpires: detail.umpires.isNotEmpty ? detail.umpires : base.umpires,
+      matchReferee: detail.matchReferee.isNotEmpty
+          ? detail.matchReferee
+          : base.matchReferee,
+      pitchReport: detail.pitchReport.isNotEmpty
+          ? detail.pitchReport
+          : base.pitchReport,
+    );
+  }
+
+  /// Re-fetch this match's full detail (scorecard) on Retry.
+  /// Never wipes the current match on failure — the last verified
+  /// copy stays on screen with a SnackBar explaining the failure.
+  Future<void> _refreshDetail({bool force = true}) async {
+    if (_refreshingDetail) return;
+    setState(() => _refreshingDetail = true);
+    try {
+      final fresh = await ApiService()
+          .fetchMatchDetail(_match.id, forceRefresh: force);
+      if (!mounted) return;
+      if (fresh != null) {
+        setState(() => _match = _mergeDetail(_match, fresh));
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Could not refresh — showing last verified data.')),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Could not refresh — showing last verified data.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _refreshingDetail = false);
+    }
+  }
+
+  /// Resolve a team's squad from the loaded player list.
+  ///
+  /// Fallback chain (never blank, never fake):
+  /// 1. Official squad ids on the match (squadA / squadB).
+  /// 2. Any loaded player whose team == [teamName].
+  /// 3. Names from this match's scorecard for that team
+  ///    (source 'scorecard' — stats not available, labelled so).
+  /// Returns (players, sourceKey) where sourceKey is one of
+  /// 'official' / 'team' / 'scorecard' / 'none'.
+  (List<Player>, String) _resolveSquad(
+      List<Player> all, List<String> ids, String teamName) {
+    final byId = {for (final p in all) p.id: p};
+    final out = <Player>[];
+    final seen = <String>{};
+    for (final id in ids) {
+      final p = byId[id];
+      if (p != null && seen.add(p.id)) out.add(p);
+    }
+    if (out.isNotEmpty) return (out, 'official');
+    for (final p in all) {
+      if (p.team == teamName && seen.add(p.id)) out.add(p);
+    }
+    if (out.isNotEmpty) return (out, 'team');
+    // Scorecard-derived names for this team's innings.
+    for (final inn in _match.innings) {
+      if (inn.team != teamName) continue;
+      for (final b in inn.batting) {
+        final key = 'scorecard-${b.playerName}';
+        if (!seen.add(key)) continue;
+        out.add(Player(
+          id: key,
+          name: b.playerName,
+          team: teamName,
+          source: 'scorecard',
+        ));
+      }
+      for (final b in inn.bowling) {
+        final key = 'scorecard-${b.playerName}';
+        if (!seen.add(key)) continue;
+        out.add(Player(
+          id: key,
+          name: b.playerName,
+          team: teamName,
+          source: 'scorecard',
+        ));
+      }
+    }
+    if (out.isNotEmpty) return (out, 'scorecard');
+    return (out, 'none');
+  }
+
+  String _squadSourceLabel(String sourceKey) {
+    switch (sourceKey) {
+      case 'official':
+        return 'Squad: official squad list';
+      case 'team':
+        return 'Squad: from available player data for this team';
+      case 'scorecard':
+        return 'Squad: from scorecard names (full stats not available)';
+      default:
+        return 'Squad not available yet for this team.';
+    }
   }
 
   /// Tap a name in the scorecard/squad → that player's profile
@@ -161,6 +352,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             Tab(text: lang.t('live')),
             Tab(text: lang.t('scorecard')),
             Tab(text: lang.t('squad')),
+            Tab(text: lang.t('venue_h2h')),
             Tab(text: lang.t('prediction')),
           ],
         ),
@@ -171,6 +363,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           _liveTab(lang),
           _scorecardTab(lang),
           _squadTab(),
+          _venueH2HTab(lang),
           _predictionTab(),
         ],
       ),
@@ -325,13 +518,8 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
         // from real scorecard data — never invented per-over runs).
         if (_match.innings.isNotEmpty)
           OverGraph(innings: _match.innings),
-        H2HCard(
-          teamA: _match.teamA,
-          teamB: _match.teamB,
-          winsA: _match.teamAWinsH2H,
-          winsB: _match.teamBWinsH2H,
-          total: _match.totalH2H,
-        ),
+        // MATCH-CENTRIC: Team H2H lives in the Venue & H2H tab now,
+        // not duplicated on Live.
         PremiumSectionHeader(
             title: lang.t('preview_info'), icon: Icons.info_outline),
         KingGradientCard(
@@ -534,9 +722,45 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           ],
         ],
         if (_match.innings.isEmpty)
-          Text(lang.isHindi
-              ? 'स्कोरकार्ड अभी उपलब्ध नहीं है।'
-              : 'Scorecard not available yet.'),
+          KingGradientCard(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(lang.t('scorecard_empty'),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w900, fontSize: 16)),
+                const SizedBox(height: 6),
+                Text(
+                    lang.isHindi
+                        ? 'यह मैच अभी शुरू नहीं हुआ है या प्रोवाइडर ने स्कोरकार्ड नहीं भेजा है।'
+                        : 'This match has not started yet, or the provider has not sent a scorecard for it.',
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 13)),
+                if (_lastUpdatedLabel() != null) ...[
+                  const SizedBox(height: 6),
+                  Text(_lastUpdatedLabel()!,
+                      style: const TextStyle(
+                          color: AppTheme.textSecondary, fontSize: 12)),
+                ],
+                const SizedBox(height: 12),
+                ElevatedButton.icon(
+                  onPressed: _refreshingDetail ? null : _refreshDetail,
+                  icon: _refreshingDetail
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child:
+                              CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.refresh, size: 18),
+                  label: Text(lang.t('retry')),
+                ),
+              ],
+            ),
+          ),
       ],
     );
   }
@@ -969,20 +1193,40 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     return FutureBuilder(
       future: _playersFuture,
       builder: (context, snap) {
-        if (!snap.hasData) {
+        if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
+        if (snap.hasError || !snap.hasData) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Could not load squad data.',
+                      textAlign: TextAlign.center),
+                  const SizedBox(height: 12),
+                  ElevatedButton.icon(
+                    onPressed: () => setState(() {}),
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('Retry'),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
         final all = snap.data!;
-        // Squad is split Team A / Team B (reference spec §4.2) — never
-        // one flat list: the user must see at a glance who plays for
-        // whom, with the match context (vs opponent • format) on
-        // every row.
-        final squadA =
-            all.where((p) => _match.squadA.contains(p.id)).toList();
-        final squadB =
-            all.where((p) => _match.squadB.contains(p.id)).toList();
+        // MATCH-CENTRIC squad: Team A / Team B, each resolved through
+        // the fallback chain (official ids → team filter →
+        // scorecard names). Never one flat list, never blank, never
+        // fake stats — every row carries this match's context.
+        final (squadA, srcA) =
+            _resolveSquad(all, _match.squadA, _match.teamA);
+        final (squadB, srcB) =
+            _resolveSquad(all, _match.squadB, _match.teamB);
         Widget teamSection(String team, List<Player> squad,
-            String opponent) {
+            String opponent, String srcKey) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -990,23 +1234,42 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                 title: '$team — Squad (${squad.length})',
                 icon: Icons.groups_outlined,
               ),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10),
+                child: Text(_squadSourceLabel(srcKey),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 12)),
+              ),
               if (squad.isEmpty)
                 const Text(
                     'Squad not available yet for this team.',
                     style: TextStyle(
                         color: AppTheme.textSecondary, fontSize: 13)),
               for (final p in squad)
-                PlayerCard(
+                SquadPlayerCard(
                   player: p,
-                  contextLine: 'vs $opponent • ${_match.format}',
-                  onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                          builder: (_) => PlayerProfileScreen(
-                              player: p,
-                              opponent: opponent,
-                              venueId: _match.venueId,
-                              format: _match.format))),
+                  opponent: opponent,
+                  format: _match.format,
+                  onTap: () {
+                    if (p.source == 'scorecard') {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                            content: Text(
+                                'Profile not available for ${p.name} yet.')),
+                      );
+                      return;
+                    }
+                    Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                            builder: (_) => PlayerProfileScreen(
+                                player: p,
+                                opponent: opponent,
+                                venueId: _match.venueId,
+                                format: _match.format)));
+                  },
                 ),
             ],
           );
@@ -1018,14 +1281,218 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             const PremiumSectionHeader(
                 title: 'Squad — tap a player for full profile',
                 icon: Icons.groups_outlined),
-            teamSection(_match.teamA, squadA, _match.teamB),
-            teamSection(_match.teamB, squadB, _match.teamA),
+            teamSection(_match.teamA, squadA, _match.teamB, srcA),
+            teamSection(_match.teamB, squadB, _match.teamA, srcB),
             if (squadA.isEmpty && squadB.isEmpty)
-              const Text('Squad data will appear once the free API '
-                  'returns squads for this match.'),
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Squad data will appear once the free API '
+                        'returns squads for this match.'),
+                    const SizedBox(height: 12),
+                    ElevatedButton.icon(
+                      onPressed: _refreshDetail,
+                      icon: const Icon(Icons.refresh, size: 18),
+                      label: const Text('Retry'),
+                    ),
+                  ],
+                ),
+              ),
           ],
         );
       },
+    );
+  }
+
+  // ---------------- VENUE + H2H ----------------
+
+  Widget _venueH2HTab(LanguageProvider lang) {
+    return FutureBuilder(
+      future: Future.wait([_playersFuture, _venuesFuture]),
+      builder: (context, snap) {
+        if (snap.connectionState == ConnectionState.waiting) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snap.hasError || !snap.hasData) {
+          return Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Could not load venue & H2H data.',
+                      textAlign: TextAlign.center),
+                  const SizedBox(height: 12),
+                  ElevatedButton.icon(
+                    onPressed: () => setState(() {}),
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: Text(lang.t('retry')),
+                  ),
+                ],
+              ),
+            ),
+          );
+        }
+        final all = snap.data![0] as List<Player>;
+        final venues = snap.data![1] as List<Venue>;
+        final venue = venues.where((v) =>
+            (_match.venueId.isNotEmpty && v.id == _match.venueId) ||
+            (v.name.isNotEmpty && v.name == _match.venueName)).firstOrNull;
+        final (squadA, _) =
+            _resolveSquad(all, _match.squadA, _match.teamA);
+        final (squadB, _) =
+            _resolveSquad(all, _match.squadB, _match.teamB);
+        final matchups = topPlayerMatchups(squadA, squadB);
+
+        return ListView(
+          padding: const EdgeInsets.all(14),
+          children: [
+            PremiumSectionHeader(
+                title: lang.t('venue_stats'), icon: Icons.stadium_outlined),
+            KingGradientCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                      _match.venueName.isNotEmpty
+                          ? _match.venueName
+                          : 'Venue not announced yet',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w900, fontSize: 18)),
+                  const SizedBox(height: 4),
+                  if (venue != null) ...[
+                    Text('${venue.city}, ${venue.country}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: AppTheme.textSecondary, fontSize: 13)),
+                    const SizedBox(height: 10),
+                    _venueStatRow('Pitch',
+                        venue.pitchType.isNotEmpty ? venue.pitchType : '—'),
+                    _venueStatRow('Avg 1st innings',
+                        venue.avgFirstInningsScore > 0
+                            ? venue.avgFirstInningsScore.toStringAsFixed(0)
+                            : '—'),
+                    _venueStatRow('Avg 2nd innings',
+                        venue.avgSecondInningsScore > 0
+                            ? venue.avgSecondInningsScore.toStringAsFixed(0)
+                            : '—'),
+                    _venueStatRow('Matches at venue',
+                        venue.totalMatches > 0
+                            ? '${venue.totalMatches}'
+                            : '—'),
+                    _venueStatRow('Bat-first wins',
+                        venue.batFirstWinPct > 0
+                            ? '${venue.batFirstWinPct.toStringAsFixed(0)}%'
+                            : '—'),
+                    if (venue.tossAdvice.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text('Toss: ${venue.tossAdvice}',
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontSize: 13)),
+                    ],
+                  ] else ...[
+                    const SizedBox(height: 6),
+                    Text(lang.t('venue_no_data'),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: AppTheme.textSecondary, fontSize: 13)),
+                  ],
+                  const SizedBox(height: 10),
+                  _venueStatRow(
+                      'Pitch (match)',
+                      _match.pitchReport.isNotEmpty
+                          ? _match.pitchReport
+                          : 'Not available from free providers yet.'),
+                  _venueStatRow('Weather',
+                      'Not available from free providers yet.'),
+                  _venueStatRow('Toss',
+                      _match.toss.isNotEmpty ? _match.toss : '—'),
+                ],
+              ),
+            ),
+            // H2HCard carries its own 'Head-to-Head' title — no
+            // duplicate section header above it.
+            H2HCard(
+              teamA: _match.teamA,
+              teamB: _match.teamB,
+              winsA: _match.teamAWinsH2H,
+              winsB: _match.teamBWinsH2H,
+              total: _match.totalH2H,
+            ),
+            PremiumSectionHeader(
+                title: lang.t('player_matchups'),
+                icon: Icons.sports_cricket),
+            if (matchups.isEmpty)
+              Text(lang.t('no_matchups_data'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: AppTheme.textSecondary, fontSize: 13))
+            else
+              for (final m in matchups)
+                KingGradientCard(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${m.bowlerName} → ${m.batterName}',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 14)),
+                            const SizedBox(height: 2),
+                            Text(
+                                '${m.dismissals} dismissal${m.dismissals == 1 ? '' : 's'} in ${m.balls} balls • ${m.runs} runs',
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                    color: AppTheme.textSecondary,
+                                    fontSize: 12)),
+                          ],
+                        ),
+                      ),
+                      GoldChip(label: '${m.dismissals}w'),
+                    ],
+                  ),
+                ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _venueStatRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 130,
+            child: Text(label,
+                style: const TextStyle(
+                    color: AppTheme.textSecondary,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700)),
+          ),
+          Expanded(
+            child: Text(value,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 13)),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1033,14 +1500,29 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     return FutureBuilder(
       future: _playersFuture,
       builder: (context, snap) {
-        if (!snap.hasData) {
+        if (snap.connectionState == ConnectionState.waiting) {
           return const Center(child: CircularProgressIndicator());
         }
+        if (snap.hasError || !snap.hasData) {
+          return const Center(
+            child: Padding(
+              padding: EdgeInsets.all(24),
+              child: Text('Could not load prediction data.',
+                  textAlign: TextAlign.center),
+            ),
+          );
+        }
         final all = snap.data!;
-        final squadIds = {..._match.squadA, ..._match.squadB};
-        final squad =
-            all.where((p) => squadIds.contains(p.id)).toList();
+        // MATCH-CENTRIC: predictions use the same resolved squads as
+        // the Squad tab — never an empty list when the Squad tab has
+        // players (scorecard fallback included).
+        final (squadA, _) =
+            _resolveSquad(all, _match.squadA, _match.teamA);
+        final (squadB, _) =
+            _resolveSquad(all, _match.squadB, _match.teamB);
+        final squad = [...squadA, ...squadB];
         final preds = squad
+            .where((p) => p.source != 'scorecard')
             .map((p) => PredictionEngine.predict(
                   player: p,
                   opponent: _match.teamA == p.team
@@ -1051,6 +1533,10 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                 ))
             .toList()
           ..sort((a, b) => b.score.compareTo(a.score));
+        // hasData guard: players with NO signal get an honest
+        // "Not enough data" row, never a fake ~50 score card.
+        final withData = preds.where((p) => p.hasData).toList();
+        final noData = preds.where((p) => !p.hasData).toList();
         return ListView(
           padding: const EdgeInsets.all(14),
           children: [
@@ -1058,7 +1544,41 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                 title: 'Who will fire? — King Prediction',
                 subtitle: 'Form + vs Opponent + Venue + Matchup + Pitch',
                 icon: Icons.psychology_outlined),
-            for (final pr in preds) PredictionCard(prediction: pr),
+            if (preds.isEmpty)
+              const Text(
+                'No squad data for this match yet — predictions will appear once squads load.',
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: AppTheme.textSecondary, fontSize: 13),
+              ),
+            for (final pr in withData) PredictionCard(prediction: pr),
+            if (noData.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              const PremiumSectionHeader(
+                  title: 'Not enough data',
+                  icon: Icons.hourglass_top),
+              for (final pr in noData)
+                KingGradientCard(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(pr.playerName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w800)),
+                      ),
+                      const Text('Not enough data to predict.',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              color: AppTheme.textSecondary,
+                              fontSize: 12)),
+                    ],
+                  ),
+                ),
+            ],
             const SizedBox(height: 12),
             const Text(
               'For information & entertainment only. Not betting advice. '
