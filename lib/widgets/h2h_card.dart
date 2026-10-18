@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import '../utils/app_theme.dart';
+import 'premium_widgets.dart';
 
-/// Team H2H bar: "India 12 — 3 Pakistan (18 matches)".
+/// V2 premium Team H2H: gold gradient bar, big win numbers, animated.
 class H2HCard extends StatelessWidget {
   final String teamA;
   final String teamB;
@@ -18,41 +19,99 @@ class H2HCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final frac = total == 0 ? 0.5 : winsA / total;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Head to Head',
-                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 16)),
-            const SizedBox(height: 4),
-            Text('$total matches • $teamA $winsA — $winsB $teamB',
-                style: const TextStyle(color: AppTheme.textSecondary)),
-            const SizedBox(height: 12),
-            ClipRRect(
+    // Clamp: winsA+winsB may exceed total in live data (draws/no-results).
+    final frac = total == 0 ? 0.5 : (winsA / total).clamp(0.0, 1.0);
+    return KingGradientCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.emoji_events,
+                  size: 20, color: AppTheme.goldLight),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text('Head to Head',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style:
+                        TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
+              ),
+              GoldChip(label: '$total matches'),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(teamA,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontWeight: FontWeight.w800)),
+                    Text('$winsA wins',
+                        style: const TextStyle(
+                            color: AppTheme.goldLight,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 22)),
+                  ],
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text('$winsA — $winsB',
+                    style: const TextStyle(fontWeight: FontWeight.w900)),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text(teamB,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(fontWeight: FontWeight.w800)),
+                    Text('$winsB wins',
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                            color: AppTheme.textSecondary,
+                            fontWeight: FontWeight.w900,
+                            fontSize: 22)),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TweenAnimationBuilder<double>(
+            tween: Tween(begin: 0, end: frac),
+            duration: const Duration(milliseconds: 800),
+            curve: Curves.easeOutCubic,
+            builder: (_, v, __) => ClipRRect(
               borderRadius: BorderRadius.circular(8),
               child: LinearProgressIndicator(
-                value: frac,
+                value: v,
                 minHeight: 10,
                 backgroundColor: AppTheme.red.withValues(alpha: 0.6),
                 valueColor: const AlwaysStoppedAnimation<Color>(
                     AppTheme.green),
               ),
             ),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(teamA,
-                    style: const TextStyle(fontWeight: FontWeight.w700)),
-                Text(teamB,
-                    style: const TextStyle(fontWeight: FontWeight.w700)),
-              ],
-            ),
-          ],
-        ),
+          ),
+          const SizedBox(height: 8),
+          Text('$teamA $winsA — $winsB $teamB • $total matches',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: AppTheme.textSecondary)),
+        ],
       ),
     );
   }
