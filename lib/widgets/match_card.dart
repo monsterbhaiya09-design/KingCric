@@ -28,7 +28,11 @@ class KingMatchCard extends StatelessWidget {
 
   /// Human label for a [CricketMatch.source] value. Unknown
   /// provider strings pass through unchanged (never blank).
+  /// Empty source (older cache / untagged) renders as 'Unknown' —
+  /// every card shows a source label, so an untagged card can never
+  /// be mistaken for verified real data.
   static String _sourceLabel(String source) {
+    if (source.trim().isEmpty) return 'Unknown';
     switch (source.toLowerCase()) {
       case 'demo':
       case 'mock':
@@ -50,6 +54,13 @@ class KingMatchCard extends StatelessWidget {
       default:
         return source;
     }
+  }
+
+  /// Demo/mock cards get an amber source label so they are visually
+  /// distinct from verified provider cards at a glance.
+  static bool _isDemoSource(String source) {
+    final s = source.toLowerCase();
+    return s == 'demo' || s == 'mock';
   }
 
   String _startsLine(DateTime start) {
@@ -175,33 +186,41 @@ class KingMatchCard extends StatelessWidget {
                     style: const TextStyle(
                         fontSize: 12, color: AppTheme.textSecondary)),
               ],
-              // FIX-7: per-card source label — demo can never
-              // masquerade as real. 'demo' = bundled demo fixture,
-              // 'CricAPI' / 'SportScore' / ... = the provider that
-              // supplied this card. '' (older cache) shows nothing
-              // rather than a guessed label.
-              if (m.source.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Text('Source: ${_sourceLabel(m.source)}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: AppTheme.textSecondary, fontSize: 11)),
-              ],
+              // SQUAD B: per-card source label — ALWAYS rendered.
+              // Demo can never masquerade as real: 'demo' = bundled
+              // demo fixture (amber label), 'CricAPI' / 'SportScore'
+              // / ... = the provider that supplied this card,
+              // 'Unknown' = older/untagged cache (never guessed).
               const SizedBox(height: 6),
-              const Row(
+              Text('Source: ${_sourceLabel(m.source)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                      color: _isDemoSource(m.source)
+                          ? AppTheme.amber
+                          : AppTheme.textSecondary,
+                      fontSize: 11)),
+              const SizedBox(height: 6),
+              // SQUAD B: honest CTA — an upcoming match HAS no
+              // scorecard yet, so it must not promise one. Upcoming
+              // cards invite to match details; live/finished cards
+              // invite to the full scorecard.
+              Row(
                 children: [
-                  Icon(Icons.arrow_forward,
+                  const Icon(Icons.arrow_forward,
                       size: 14, color: AppTheme.goldLight),
-                  SizedBox(width: 4),
-                  Text('Tap for FULL scorecard',
-                      style: TextStyle(
+                  const SizedBox(width: 4),
+                  Text(
+                      upcoming
+                          ? 'Tap for match details'
+                          : 'Tap for FULL scorecard',
+                      style: const TextStyle(
                           color: AppTheme.goldLight,
                           fontSize: 12,
                           fontWeight: FontWeight.w700)),
-                  Spacer(),
-                  Text('Scorecard →',
-                      style: TextStyle(
+                  const Spacer(),
+                  Text(upcoming ? 'Details →' : 'Scorecard →',
+                      style: const TextStyle(
                           color: AppTheme.gold, fontSize: 12)),
                 ],
               ),
