@@ -22,6 +22,14 @@ class PredictionCard extends StatelessWidget {
     }
   }
 
+  /// NaN/Inf-safe, clamped 0..1 fraction for a 0-100 input score.
+  static double _frac(double v) =>
+      v.isNaN || v.isInfinite ? 0.0 : (v / 100).clamp(0.0, 1.0);
+
+  /// Display text for a 0-100 input score: '—' when no data (NaN/Inf).
+  static String _scoreText(double v) =>
+      v.isNaN || v.isInfinite ? '—' : v.toStringAsFixed(0);
+
   @override
   Widget build(BuildContext context) {
     final isHindi = context.watch<LanguageProvider>().isHindi;
@@ -80,27 +88,49 @@ class PredictionCard extends StatelessWidget {
                       style: const TextStyle(
                           color: AppTheme.textSecondary, fontSize: 13)),
                   const SizedBox(height: 10),
+                  // Model inputs — the full weighted formula, not just 3.
+                  // Form 30% • vs Opponent 25% • Venue 20% •
+                  // Matchup 15% • Pitch 10%. '—' = no data for that input.
+                  const Text(
+                      'Form 30% • vs Opponent 25% • Venue 20% • Matchup 15% • Pitch 10%',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          color: AppTheme.textSecondary, fontSize: 11)),
+                  const SizedBox(height: 6),
                   StatBar(
                       label: 'Recent Form',
-                      value: prediction.recentFormScore
-                          .toStringAsFixed(0),
-                      fraction: (prediction.recentFormScore.isNaN
-                              ? 0.0
-                              : prediction.recentFormScore) /
-                          100,
+                      value: _scoreText(prediction.recentFormScore),
+                      fraction: _frac(prediction.recentFormScore),
                       color: AppTheme.gold),
                   StatBar(
                       label: 'vs Opponent',
-                      value: prediction.vsOpponentScore.toStringAsFixed(0),
-                      fraction:
-                          (prediction.vsOpponentScore.isNaN ? 0.0 : prediction.vsOpponentScore) / 100,
+                      value: _scoreText(prediction.vsOpponentScore),
+                      fraction: _frac(prediction.vsOpponentScore),
                       color: AppTheme.blue),
                   StatBar(
                       label: 'Venue',
-                      value: prediction.venueScore.toStringAsFixed(0),
-                      fraction:
-                          (prediction.venueScore.isNaN ? 0.0 : prediction.venueScore) / 100,
+                      value: _scoreText(prediction.venueScore),
+                      fraction: _frac(prediction.venueScore),
                       color: AppTheme.green),
+                  StatBar(
+                      label: 'Matchup',
+                      value: _scoreText(prediction.matchupScore),
+                      fraction: _frac(prediction.matchupScore),
+                      color: AppTheme.amber),
+                  StatBar(
+                      label: 'Pitch',
+                      value: _scoreText(prediction.pitchScore),
+                      fraction: _frac(prediction.pitchScore),
+                      color: AppTheme.red),
+                  const SizedBox(height: 10),
+                  // Honesty: a model, never a guarantee, never betting advice.
+                  const Text(
+                      'Prediction is a model, not a guarantee. For information & entertainment only. Not betting advice.',
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          color: AppTheme.textSecondary, fontSize: 11)),
                 ],
               ),
             ),
