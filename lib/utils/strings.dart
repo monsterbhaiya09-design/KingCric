@@ -103,8 +103,12 @@ class Strings {
       'hi': 'मैदान के आंकड़े फ्री प्रोवाइडर से अभी उपलब्ध नहीं हैं।'
     },
     'no_matchups_data': {
-      'en': 'No bowler-vs-batter history in loaded data.',
-      'hi': 'लोड किए गए डेटा में बॉलर-vs-बैटर इतिहास नहीं है।'
+      'en': 'No bowler-vs-batter history in loaded data (2024–2026).',
+      'hi': 'लोड किए गए डेटा (2024–2026) में बॉलर-vs-बैटर इतिहास नहीं है।'
+    },
+    'no_h2h_data': {
+      'en': 'No head-to-head in loaded data (2024–2026).',
+      'hi': 'लोड किए गए डेटा (2024–2026) में आमने-सामने का इतिहास नहीं है।'
     },
     'not_enough_data': {
       'en': 'Not enough data to predict.',
