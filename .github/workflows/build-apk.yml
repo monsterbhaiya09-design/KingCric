@@ -176,32 +176,60 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+      # 2026-10-18 FIX (run 39113688632): Build (real Gradle) SUCCEEDED but
+      # Verify FAILED on an unknown sub-check and Upload was SKIPPED, so
+      # the built APK was lost with the ephemeral runner. Verify now runs
+      # EVERY sub-check (no `set -e` kill on first failure), records
+      # PASS/FAIL per check into verify-report.txt, and Upload has
+      # `if: always()` so the next run ALWAYS produces the APK artifact
+      # even if a strict check trips. Verify still exits non-zero when
+      # any strict check fails, so a tripped check stays visible.
       - name: Verify APK
         run: |
-          set -euo pipefail
+          set -u
           APK=build/app/outputs/flutter-apk/app-release.apk
-          test -f "$APK"
-          ls -lh "$APK"
-          sha256sum "$APK"
+          REPORT=verify-report.txt
+          : > "$REPORT"
+          FAIL=0
+          check() { # check <label> <command...>
+            local label="$1"; shift
+            if "$@" >>"$REPORT" 2>&1; then
+              echo "PASS: $label" | tee -a "$REPORT"
+            else
+              echo "FAIL: $label" | tee -a "$REPORT"
+              FAIL=1
+            fi
+          }
+          echo "=== KingCric APK verification ===" | tee -a "$REPORT"
+          if [ -f "$APK" ]; then
+            echo "PASS: APK file exists: $APK" | tee -a "$REPORT"
+            ls -lh "$APK" | tee -a "$REPORT"
+            sha256sum "$APK" | tee -a "$REPORT"
+          else
+            echo "FAIL: APK file exists: $APK (NOT FOUND)" | tee -a "$REPORT"
+            echo "--- verify-report.txt ---"
+            cat "$REPORT"
+            exit 1
+          fi
           # Resolve build-tools: prefer 36.0.0, fall back to latest
           # installed (ubuntu-latest does not guarantee 36.0.0).
           BT="$ANDROID_HOME/build-tools/36.0.0"
           if [ ! -d "$BT" ]; then
             BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)"
           fi
-          echo "Using build-tools: $BT"
-          test -x "$BT/aapt2"
-          # Badging must show the package + SDKs (fails the job if not).
-          "$BT/aapt2" dump badging "$APK" | tee /tmp/badging.txt
-          grep -q "name='com.kingcric.app'" /tmp/badging.txt
-          grep -q "minSdkVersion:'24'" /tmp/badging.txt
-          grep -q "targetSdkVersion:'36'" /tmp/badging.txt
-          grep -q "supports-any-density: 'true'" /tmp/badging.txt
+          echo "Using build-tools: $BT" | tee -a "$REPORT"
+          check "aapt2 executable" test -x "$BT/aapt2"
+          # Badging must show the package + SDKs.
+          "$BT/aapt2" dump badging "$APK" | tee /tmp/badging.txt | tee -a "$REPORT"
+          check "badging name='com.kingcric.app'" grep -q "name='com.kingcric.app'" /tmp/badging.txt
+          check "badging minSdkVersion:'24'" grep -q "minSdkVersion:'24'" /tmp/badging.txt
+          check "badging targetSdkVersion:'36'" grep -q "targetSdkVersion:'36'" /tmp/badging.txt
+          check "badging supports-any-density: 'true'" grep -q "supports-any-density: 'true'" /tmp/badging.txt
           # Signature + alignment.
-          "$BT/apksigner" verify --verbose "$APK"
-          "$BT/zipalign" -c -v -P 16 4 "$APK"
+          check "apksigner verify" "$BT/apksigner" verify --verbose "$APK"
+          check "zipalign -c -P 16" "$BT/zipalign" -c -v -P 16 4 "$APK"
           # Native libs for every ABI (Flutter + app + dartjni).
-          python3 -c "
+          check "native libs for all ABIs" python3 -c "
           import zipfile
           z = zipfile.ZipFile('$APK')
           names = z.namelist()
@@ -211,12 +239,30 @@ jobs:
                   assert f'lib/{abi}/{lib}' in names, f'missing lib/{abi}/{lib}'
           print('native libs OK for all ABIs')
           "
+          echo "--- verify-report.txt ---"
+          cat "$REPORT"
+          if [ "$FAIL" -ne 0 ]; then
+            echo "APK verification FAILED (one or more strict checks tripped) - see verify-report.txt"
+            exit 1
+          fi
           echo "APK verification PASSED"
 
+      - name: Upload verify report (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingcric-verify-report
+          path: |
+            verify-report.txt
+            build-apk.log
+          if-no-files-found: warn
+          retention-days: 30
+
       - name: Upload APK artifact
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: kingcric-app-release-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
