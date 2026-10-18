@@ -332,13 +332,21 @@ class CricApiProvider implements CricketProvider {
           final pname = '${m['name'] ?? ''}';
           if (id.isEmpty || pname.isEmpty) continue;
           final have = norm(pname);
-          if (have == want) return id;
+          if (have == want) {
+            _log('resolvePlayerId',
+                received: list.length, dropped: 0, kept: 1);
+            return id;
+          }
           if (containsMatch == null &&
               (have.contains(want) || want.contains(have))) {
             containsMatch = id;
           }
         } catch (_) {}
       }
+      _log('resolvePlayerId',
+          received: list.length,
+          dropped: 0,
+          kept: containsMatch == null ? 0 : 1);
       return containsMatch;
     } catch (_) {
       return null;
@@ -382,7 +390,11 @@ class CricApiProvider implements CricketProvider {
       _updateQuota(body);
       if (body['status'] == 'failure') return null;
       final data = (body['data'] as Map?)?.cast<String, dynamic>() ?? {};
-      if (data.isEmpty) return null;
+      if (data.isEmpty) {
+        _log('fetchPlayer', received: 0, dropped: 0, kept: 0);
+        return null;
+      }
+      _log('fetchPlayer', received: 1, dropped: 0, kept: 1);
       return _playerFromInfo(data, numericId);
     } catch (_) {
       return null;
@@ -735,6 +747,21 @@ class CricApiProvider implements CricketProvider {
     }
     final winner = j['matchWinner'] as String? ?? '';
     final result = winner.isNotEmpty ? '$winner won' : base.result;
+    // SQUAD C: the envelope status is not the whole truth. A live
+    // scorecard can carry a stale "Match scheduled" label (and no
+    // `score` array), so base.status may say upcoming even though
+    // full innings exist. Innings data is scores too: a declared
+    // winner = completed, innings with real data and no winner =
+    // live. Never let a scorecard with innings parse as upcoming.
+    var status = base.status;
+    if (winner.isNotEmpty) {
+      status = MatchStatus.completed;
+    } else if (status == MatchStatus.upcoming &&
+        innings.any((i) =>
+            i.total > 0 ||
+            i.batting.any((b) => b.balls > 0 || b.runs > 0))) {
+      status = MatchStatus.live;
+    }
     return CricketMatch(
       id: base.id,
       teamA: base.teamA,
@@ -743,7 +770,7 @@ class CricApiProvider implements CricketProvider {
       league: base.league,
       venueName: base.venueName,
       startTime: base.startTime,
-      status: base.status,
+      status: status,
       scores: base.scores,
       result: result,
       toss: base.toss,
