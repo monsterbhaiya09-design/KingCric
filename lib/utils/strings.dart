@@ -63,6 +63,53 @@ class Strings {
     // is a compile error). Home composes no_matches_found with the
     // search query, so its value ends with "for" by design.
     'trending_players': {'en': 'Trending Players', 'hi': 'ट्रेंडिंग खिलाड़ी'},
+    // Match-centric redesign: Home is matches only; players live
+    // inside their match. (trending_players / no_trending keys are
+    // kept for the Stats screen + existing tests.)
+    'home_players_hint': {
+      'en': 'Players live inside each match — open a match, then Squad.',
+      'hi': 'खिलाड़ी हर मैच के अंदर हैं — मैच खोलें, फिर स्क्वाड देखें।'
+    },
+    'venue_h2h': {'en': 'Venue & H2H', 'hi': 'मैदान और आमने-सामने'},
+    'venue_stats': {'en': 'Venue Stats', 'hi': 'मैदान के आंकड़े'},
+    'toss_impact': {'en': 'Toss Impact', 'hi': 'टॉस का असर'},
+    'player_matchups': {
+      'en': 'Top Player Matchups (Bowler vs Batter)',
+      'hi': 'टॉप खिलाड़ी मुकाबले (बॉलर vs बैटर)'
+    },
+    'scorecard_empty': {
+      'en': 'Scorecard not available yet.',
+      'hi': 'स्कोरकार्ड अभी उपलब्ध नहीं है।'
+    },
+    'retry': {'en': 'Retry', 'hi': 'फिर से कोशिश करें'},
+    'squad_source_official': {
+      'en': 'Squad: official squad list',
+      'hi': 'स्क्वाड: आधिकारिक स्क्वाड सूची'
+    },
+    'squad_source_team': {
+      'en': 'Squad: from available player data for this team',
+      'hi': 'स्क्वाड: इस टीम के उपलब्ध खिलाड़ी डेटा से'
+    },
+    'squad_source_scorecard': {
+      'en': 'Squad: from scorecard names (full stats not available)',
+      'hi': 'स्क्वाड: स्कोरकार्ड के नामों से (पूरे आंकड़े उपलब्ध नहीं)'
+    },
+    'no_squad_data': {
+      'en': 'Squad data will appear once the free API returns squads for this match.',
+      'hi': 'इस मैच के लिए स्क्वाड डेटा फ्री API से आते ही दिखेगा।'
+    },
+    'venue_no_data': {
+      'en': 'Venue stats not available from free providers yet.',
+      'hi': 'मैदान के आंकड़े फ्री प्रोवाइडर से अभी उपलब्ध नहीं हैं।'
+    },
+    'no_matchups_data': {
+      'en': 'No bowler-vs-batter history in loaded data.',
+      'hi': 'लोड किए गए डेटा में बॉलर-vs-बैटर इतिहास नहीं है।'
+    },
+    'not_enough_data': {
+      'en': 'Not enough data to predict.',
+      'hi': 'भविष्यवाणी के लिए पर्याप्त डेटा नहीं है।'
+    },
     'next_up': {'en': 'Next up', 'hi': 'अगला मैच'},
     'no_live_matches': {
       'en': 'No live matches right now.',
