@@ -59,20 +59,35 @@ class BattingStats {
       };
 
   /// Merge two stat blocks (e.g. T20 + ODI combined view).
+  ///
+  /// Cricket average = runs / dismissals, NOT runs / innings. The
+  /// block does not store dismissals, so they are recovered from
+  /// each block as runs / average (average > 0). Never-dismissed
+  /// blocks (average == runs, or 0 runs) contribute 0 dismissals.
   BattingStats operator +(BattingStats o) {
     final b = balls + o.balls;
     final inn = innings + o.innings;
+    final totalRuns = runs + o.runs;
+    double dismissalsFor(BattingStats s) {
+      if (s.runs <= 0) return 0;
+      if (s.average <= 0) return 0;
+      return s.runs / s.average;
+    }
+
+    final dismissals = dismissalsFor(this) + dismissalsFor(o);
+    final mergedAverage =
+        dismissals <= 0 ? totalRuns.toDouble() : totalRuns / dismissals;
     return BattingStats(
       matches: matches + o.matches,
       innings: inn,
-      runs: runs + o.runs,
+      runs: totalRuns,
       balls: b,
       fifties: fifties + o.fifties,
       hundreds: hundreds + o.hundreds,
       fours: fours + o.fours,
       sixes: sixes + o.sixes,
-      average: inn == 0 ? 0 : (runs + o.runs) / inn,
-      strikeRate: b == 0 ? 0 : (runs + o.runs) * 100 / b,
+      average: mergedAverage,
+      strikeRate: b == 0 ? 0 : totalRuns * 100 / b,
       highest: highest > o.highest ? highest : o.highest,
     );
   }
