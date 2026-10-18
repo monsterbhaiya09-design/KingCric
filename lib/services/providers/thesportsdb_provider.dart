@@ -153,6 +153,23 @@ class TheSportsDbProvider implements CricketProvider {
   }
 
   @override
+  Future<List<CricketMatch>?> fetchUpcoming() async {
+    if (_capped) return null;
+    final next = await _getJson(_uri('searchevents.php?e=Cricket'));
+    if (next == null) return null;
+    final parsed = <CricketMatch>[];
+    for (final e in _events(next)) {
+      final m = _matchFromEvent(e);
+      if (m != null &&
+          m.status == MatchStatus.upcoming &&
+          !m.isEffectivelyLive) {
+        parsed.add(m);
+      }
+    }
+    return parsed.isEmpty ? null : parsed;
+  }
+
+  @override
   Future<CricketMatch?> fetchScorecard(String matchId) async {
     // TheSportsDB has no full innings scorecard (batting/bowling) in
     // the free V1 API. Null -> orchestrator uses CricAPI / cache.
