@@ -68,7 +68,12 @@ class _HomeScreenState extends State<HomeScreen> {
         _matches = merged;
         _loading = false;
         _offline = false;
-        _lastUpdated = DateTime.now();
+        // SQUAD B: "Last updated" shows the SERVICE's own fetch
+        // timestamp, not the wall clock. A cache/mock serve must not
+        // advance the clock and pretend the data is fresh. Falls back
+        // to the previous timestamp, then to now on first load.
+        _lastUpdated =
+            _api.lastMatchesUpdated ?? _lastUpdated ?? DateTime.now();
       });
     } catch (_) {
       if (!mounted) return;
@@ -245,40 +250,31 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           const SizedBox(height: 10),
-          // FIX-7: DISTINCT banners — never silent degrade.
-          // (a) No key configured at all -> demo mode by
-          // construction. (b) Server-side quota exhausted ->
-          // last verified data + explicit quota message. (c) Last
-          // fetch fell back to demo/stale (all providers down) ->
-          // demo banner REGARDLESS of key presence (the old code
-          // only showed it when lastSource=='mock' AND isLive, and
-          // the warm-cache path never set lastSource at all).
+          // SQUAD B: four banners, four DISTINCT looks — never silent
+          // degrade, never two states in the same amber box.
+          // (a) No key configured -> demo mode by construction.
+          // (b) Server-side quota exhausted -> last verified data +
+          // explicit quota message. (c) Last fetch fell back to
+          // demo/stale (all providers down) -> demo banner
+          // REGARDLESS of key presence. (d) Offline -> last
+          // verified data stays on screen, user told why stale.
           if (_api.quotaState == QuotaState.keyMissing)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                  color: AppTheme.amber.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: AppTheme.amber.withValues(alpha: 0.4))),
+            _HomeBanner(
+              color: AppTheme.red,
+              icon: Icons.key_off,
+              semanticsLabel: 'API key missing, showing demo data',
               child: Text(lang.t('mock_mode'),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 12)),
             ),
           if (_api.quotaState == QuotaState.quotaExhausted && !_loading)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                  color: AppTheme.amber.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: AppTheme.amber.withValues(alpha: 0.4))),
-              child: const Text(
+            const _HomeBanner(
+              color: AppTheme.amber,
+              icon: Icons.hourglass_bottom,
+              semanticsLabel:
+                  'Daily API quota exhausted, showing last verified data',
+              child: Text(
                   'Daily API quota exhausted (server reported 0 hits '
                   'left) — showing last verified data. Live data '
                   'resumes when the daily quota resets. Pull to '
@@ -290,35 +286,23 @@ class _HomeScreenState extends State<HomeScreen> {
           if (_api.quotaState != QuotaState.quotaExhausted &&
               _api.lastFetchWasMock &&
               !_loading)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                  color: AppTheme.amber.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: AppTheme.amber.withValues(alpha: 0.4))),
-              child: const Text(
+            const _HomeBanner(
+              color: AppTheme.textMuted,
+              icon: Icons.info_outline,
+              semanticsLabel:
+                  'Live data unavailable, showing demo data',
+              child: Text(
                   'Live data unavailable right now — showing demo / '
                   'last verified data. Pull to refresh later.',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 12)),
             ),
-          // G4: offline banner — last verified data stays on screen,
-          // and the user is told why it may be stale.
           if (_offline)
-            Container(
-              width: double.infinity,
-              margin: const EdgeInsets.only(bottom: 12),
-              padding: const EdgeInsets.symmetric(
-                  horizontal: 12, vertical: 10),
-              decoration: BoxDecoration(
-                  color: AppTheme.amber.withValues(alpha: 0.15),
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(
-                      color: AppTheme.amber.withValues(alpha: 0.4))),
+            _HomeBanner(
+              color: AppTheme.blue,
+              icon: Icons.wifi_off,
+              semanticsLabel: 'Offline, showing last verified data',
               child: Text(lang.t('offline_banner'),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
@@ -449,6 +433,49 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: AppTheme.textSecondary, fontSize: 12)),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// One status banner with a DISTINCT look per state (SQUAD B):
+/// colour + icon + semantics label differ, so key-missing,
+/// quota-exhausted, demo-fallback and offline can never be confused
+/// with each other. The banner is a live region for screen readers.
+class _HomeBanner extends StatelessWidget {
+  final Color color;
+  final IconData icon;
+  final String semanticsLabel;
+  final Widget child;
+  const _HomeBanner({
+    required this.color,
+    required this.icon,
+    required this.semanticsLabel,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      liveRegion: true,
+      label: semanticsLabel,
+      child: Container(
+        width: double.infinity,
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withValues(alpha: 0.4)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 8),
+            Expanded(child: child),
+          ],
+        ),
       ),
     );
   }
