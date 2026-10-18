@@ -54,7 +54,13 @@ class MatchDiff {
     final scores = m.scores
         .map((s) => '${s.team}:${s.runs}/${s.wickets}@${s.overs}')
         .join('|');
-    return '${m.status.name}|$scores|${m.result}';
+    // EFFECTIVE status, not the raw field: two copies of one match
+    // (one status=upcoming with scores, one status=live) are the
+    // SAME on screen and must not count as "changed" / re-render.
+    final eff = m.isCompleted
+        ? 'completed'
+        : (m.isEffectivelyLive ? 'live' : 'upcoming');
+    return '$eff|$scores|${m.result}';
   }
 
   static List<String> changedIds(
