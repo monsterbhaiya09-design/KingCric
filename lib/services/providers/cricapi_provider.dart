@@ -84,6 +84,43 @@ class CricApiProvider implements CricketProvider {
     }
   }
 
+  /// Upcoming fixtures via /v1/matches (the endpoint /currentMatches
+  /// never returns). CricAPI /matches returns upcoming + recent
+  /// matches; we keep only the not-started ones here so the
+  /// orchestrator's Upcoming tab is real, not empty. Called at most
+  /// once per hour by the orchestrator (60-min upcoming cache) so
+  /// this costs ~1 extra CricAPI hit/hour, not one per refresh.
+  @override
+  Future<List<CricketMatch>?> fetchUpcoming() async {
+    if (!isConfigured || _capped) return null;
+    final uri = Uri.parse(
+        '${AppConstants.cricApiBaseUrl}/matches?apikey=${AppConstants.cricApiKey}&offset=0');
+    final res = await _get(uri);
+    if (res == null || res.statusCode != 200) return null;
+    try {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      if (body['status'] == 'failure') return null;
+      final list = (body['data'] as List?) ?? [];
+      final parsed = <CricketMatch>[];
+      for (final e in list) {
+        try {
+          final m =
+              _matchFromFreeApi((e as Map).cast<String, dynamic>());
+          // Keep only genuinely not-started fixtures. Anything with
+          // scores / a result is a live/completed match that belongs
+          // in the main list, not Upcoming.
+          if (m.status == MatchStatus.upcoming &&
+              !m.isEffectivelyLive) {
+            parsed.add(m);
+          }
+        } catch (_) {}
+      }
+      return parsed.isEmpty ? null : parsed;
+    } catch (_) {
+      return null;
+    }
+  }
+
   @override
   Future<CricketMatch?> fetchScorecard(String matchId) async {
     if (!isConfigured || _capped) return null;
