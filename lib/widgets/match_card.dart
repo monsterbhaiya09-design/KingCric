@@ -26,6 +26,32 @@ class KingMatchCard extends StatelessWidget {
     'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
   ];
 
+  /// Human label for a [CricketMatch.source] value. Unknown
+  /// provider strings pass through unchanged (never blank).
+  static String _sourceLabel(String source) {
+    switch (source.toLowerCase()) {
+      case 'demo':
+      case 'mock':
+        return 'Demo';
+      case 'cricapi':
+        return 'CricAPI';
+      case 'sportscore':
+        return 'SportScore';
+      case 'thesportsdb':
+        return 'TheSportsDB';
+      case 'elitesport':
+        return 'EliteSport';
+      case 'entitysport':
+        return 'EntitySport';
+      case 'cricsheet':
+        return 'Cricsheet';
+      case 'merged':
+        return 'Live APIs';
+      default:
+        return source;
+    }
+  }
+
   String _startsLine(DateTime start) {
     final now = DateTime.now();
     final local = start.toLocal();
@@ -148,6 +174,19 @@ class KingMatchCard extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         fontSize: 12, color: AppTheme.textSecondary)),
+              ],
+              // FIX-7: per-card source label — demo can never
+              // masquerade as real. 'demo' = bundled demo fixture,
+              // 'CricAPI' / 'SportScore' / ... = the provider that
+              // supplied this card. '' (older cache) shows nothing
+              // rather than a guessed label.
+              if (m.source.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text('Source: ${_sourceLabel(m.source)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 11)),
               ],
               const SizedBox(height: 6),
               const Row(
