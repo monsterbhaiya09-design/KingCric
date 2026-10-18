@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../../models/match.dart';
 import '../../models/player.dart';
@@ -117,6 +118,7 @@ class SportScoreProvider implements CricketProvider {
       scores: scores,
       result: ProviderParsing.toStr(m['status'] ?? ''),
       lastUpdated: DateTime.now(),
+      source: 'SportScore',
     );
   }
 
@@ -145,6 +147,7 @@ class SportScoreProvider implements CricketProvider {
           .map(_matchFromGeneric)
           .whereType<CricketMatch>()
           .toList();
+      debugPrint('KingCric [SportScore] fetchMatches: path=$path kept=${parsed.length}');
       if (parsed.isNotEmpty) return parsed;
     }
     return null;
@@ -171,6 +174,17 @@ class SportScoreProvider implements CricketProvider {
     // series list to map. Null -> orchestrator falls back.
     return null;
   }
+
+  @override
+  /// FIX-7: no name->id lookup, no server quota reporting.
+  @override
+  Future<String?> resolvePlayerId(String name) async => null;
+
+  @override
+  int? get serverHitsLeft => null;
+
+  @override
+  bool get quotaExhausted => false;
 
   @override
   Future<Player?> fetchPlayer(String playerId) async {
