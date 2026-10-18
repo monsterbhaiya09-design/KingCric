@@ -160,6 +160,7 @@ class EntitySportProvider implements CricketProvider {
   }
 
   @override
+  @override
   Future<List<CricketMatch>?> fetchMatches() async {
     final body = await _getJson(_uri('/matches'));
     if (body == null) return null;
@@ -167,6 +168,12 @@ class EntitySportProvider implements CricketProvider {
         _items(body).map(_matchFromGeneric).whereType<CricketMatch>().toList();
     return parsed.isEmpty ? null : parsed;
   }
+
+  // No dedicated fixtures endpoint used: /matches covers it.
+  // (Implements requires an explicit override; base default is
+  // not inherited through `implements`.)
+  @override
+  Future<List<CricketMatch>?> fetchUpcoming() async => null;
 
   @override
   Future<CricketMatch?> fetchScorecard(String matchId) async {
