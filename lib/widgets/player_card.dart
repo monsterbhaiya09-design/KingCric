@@ -15,6 +15,7 @@ class PlayerCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final bat = player.battingOverall();
+    final bowl = player.bowlingOverall();
     const maxRuns = 15000.0;
     final frac = (bat.runs / maxRuns).clamp(0.0, 1.0);
     return Container(
@@ -80,39 +81,73 @@ class PlayerCard extends StatelessWidget {
                         style: TextStyle(
                             color: AppTheme.textSecondary, fontSize: 11)),
                     const SizedBox(height: 2),
-                    Text(
-                        'Avg ${bat.average.toStringAsFixed(1)} • SR ${bat.strikeRate.toStringAsFixed(1)}',
+                    // Avg + SR on separate lines: the combined
+                    // "Avg 45.6 • SR 78.8" string clipped in the 92px
+                    // column on narrow phones. Wkts shown when > 0.
+                    Text('Avg ${bat.average.toStringAsFixed(1)}',
                         maxLines: 1,
-                        overflow: TextOverflow.clip,
+                        overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.right,
                         style: const TextStyle(
                             color: AppTheme.textSecondary, fontSize: 11)),
+                    Text('SR ${bat.strikeRate.toStringAsFixed(1)}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.right,
+                        style: const TextStyle(
+                            color: AppTheme.textSecondary, fontSize: 11)),
+                    if (bowl.wickets > 0)
+                      Text('${bowl.wickets} wkts',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          textAlign: TextAlign.right,
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 11)),
                     const SizedBox(height: 2),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          player.dataComplete
-                              ? Icons.verified
-                              : Icons.hourglass_top,
-                          size: 13,
-                          color: player.dataComplete
-                              ? AppTheme.green
-                              : AppTheme.amber,
-                        ),
-                        const SizedBox(width: 4),
-                        Flexible(
-                          child: Text(
-                              player.dataComplete
-                                  ? 'Complete'
-                                  : 'Verifying…',
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                  color: AppTheme.textSecondary,
-                                  fontSize: 11)),
-                        ),
-                      ],
+                    // V3 BUG FIX: mock/demo players showed "Complete"
+                    // next to Virat's 27150 runs — misleading, because
+                    // the curated demo dataset is NOT verified real
+                    // data. Label honestly by source: Cricsheet =
+                    // Real, demo = Demo, anything else partial =
+                    // Partial.
+                    Builder(
+                      builder: (_) {
+                        final isReal =
+                            player.source == 'cricsheet';
+                        final isDemo = player.source == 'demo' ||
+                            (!isReal && !player.dataComplete);
+                        final label = isReal
+                            ? 'Real • Cricsheet'
+                            : isDemo
+                                ? 'Demo'
+                                : 'Partial';
+                        final color = isReal
+                            ? AppTheme.green
+                            : isDemo
+                                ? AppTheme.amber
+                                : AppTheme.textSecondary;
+                        final icon = isReal
+                            ? Icons.verified
+                            : isDemo
+                                ? Icons.sports_cricket
+                                : Icons.hourglass_top;
+                        return Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(icon, size: 13, color: color),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                  label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                      color: AppTheme.textSecondary,
+                                      fontSize: 11)),
+                            ),
+                          ],
+                        );
+                      },
                     ),
                   ],
                 ),
