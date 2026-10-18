@@ -22,6 +22,7 @@ defensive parsing, per-provider daily cap):
 | 4 Backstop | SportScore | `sportscore_provider.dart` | none | ~10k/IP/day, cap 500, attribution required |
 | 5 Metadata | TheSportsDB | `thesportsdb_provider.dart` | test key `123` / `SPORTSDB_API_KEY` | ~500/day, cap 400 |
 | 6 Fallback | Cache → Mock demo | `api_service.dart` + `mock_data_service.dart` | — | always works offline |
+| 0 Deep stats (fetchPlayer only) | **Cricsheet** open data | `cricsheet_service.dart` + `assets/cricsheet_sample.json` | none | **REAL calculated** career / vs-opponent / venue / matchup / dismissal / form / H2H. Tried FIRST in `fetchPlayer` (offline, zero quota). Sample = 4 T20Is, labelled with dataset size. Full dataset = `all_json.zip` refresh, no code change. See CRICSHEET-DATA.md. |
 
 ## Fallback + cross-check
 
@@ -47,8 +48,12 @@ Secrets: `CRIC_API_KEY`, `ELITESPORT_API_KEY`, `ENTITYSPORT_API_KEY`,
 ## Honest limits (see API-SETUP.md §9)
 
 - Full innings scorecards: only CricAPI (EliteSport once host verified).
-- Deep career / vs-opponent / venue / matchup: NO free provider in
-  this set returns them — curated dataset + `dataComplete:false`.
+- Deep career / vs-opponent / venue / matchup: now from **Cricsheet
+  open data** (real calculated stats, offline). Bundled sample = 4
+  T20Is — real-over-sample, labelled with dataset size, NOT a full
+  career. Full careers need the `all_json.zip` refresh (no code
+  change). Players missing from Cricsheet still fall back to curated
+  dataset + `dataComplete:false`.
 - EliteSport base URL UNVERIFIED — may silently return null (safe).
 - EntitySport dev token: sample completed competitions only.
 - TheSportsDB free livescore is delayed; metadata/schedule backstop.
