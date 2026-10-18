@@ -134,6 +134,17 @@ class ProviderParsing {
         s.contains('abandoned')) {
       return MatchStatus.completed;
     }
+    // MAIN-CORE FIX: runs on the board beat a stale "not started"
+    // label. A fixtures feed (/v1/matches) can carry a stale status
+    // string ("Match scheduled", "Preview", "Upcoming") for a match
+    // whose score array already shows runs — the old order returned
+    // UPCOMING here, and the match hid under Upcoming with scores
+    // on the board (screenshot bug). Scores + no result = in
+    // progress, whatever the provider's status string says. A
+    // genuinely not-started match has an empty / all-zero score
+    // array, so hasScores is false and the not-started branch below
+    // still applies (pre-toss rain delay stays upcoming).
+    if (hasScores) return MatchStatus.live;
     // Explicitly not started — must beat the "started" substring.
     if (s.contains('not started') ||
         s.contains('yet to start') ||
