@@ -188,6 +188,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           : base.teamBWinsH2H,
       totalH2H:
           detail.totalH2H != 0 ? detail.totalH2H : base.totalH2H,
+      source: detail.source.isNotEmpty ? detail.source : base.source,
       lastUpdated: detail.lastUpdated ?? base.lastUpdated,
       umpires: detail.umpires.isNotEmpty ? detail.umpires : base.umpires,
       matchReferee: detail.matchReferee.isNotEmpty
@@ -296,9 +297,15 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   }
 
   /// Tap a name in the scorecard/squad → that player's profile
-  /// (reference rule P12: no dead text). Matches by exact name, then
-  /// by first/last name, then by "contains". If no player exists in
-  /// the loaded list, a SnackBar says so — never a silent dead tap.
+  /// (reference rule P12: no dead text).
+  ///
+  /// FIX-7: the old code hard-blocked scorecard players with a
+  /// "Profile not available" SnackBar and never attempted a fetch.
+  /// Now every tap goes through [ApiService.fetchPlayer], which
+  /// resolves the name (Cricsheet first, then provider id lookup)
+  /// and returns a real profile when one exists. Only when every
+  /// source returns null does the SnackBar appear — and it says so
+  /// honestly instead of pretending the player has no data.
   Future<void> _openPlayerByName(String name) async {
     final players = await _playersFuture;
     Player? found;
@@ -314,6 +321,17 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
       return parts.isNotEmpty &&
           p.name.toLowerCase().contains(parts.last);
     }).firstOrNull;
+    if (found == null) {
+      // Not in the local list: fetch (Cricsheet -> provider lookup).
+      // A scorecard name like 'Aiden Markram' resolves via the
+      // provider's player-id lookup; a name no source knows stays
+      // unavailable — but only AFTER trying.
+      try {
+        found = await ApiService().fetchPlayer(name);
+      } catch (_) {
+        found = null;
+      }
+    }
     if (!mounted) return;
     if (found == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -322,10 +340,19 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
       );
       return;
     }
+    // Local copy: `found` is captured by the builder closure, so
+    // promotion does not apply inside it.
+    final profile = found;
     Navigator.push(
         context,
         MaterialPageRoute(
-            builder: (_) => PlayerProfileScreen(player: found!)));
+            builder: (_) => PlayerProfileScreen(
+                player: profile,
+                opponent: _match.teamA == profile.team
+                    ? _match.teamB
+                    : _match.teamA,
+                venueId: _match.venueId,
+                format: _match.format)));
   }
 
   @override
@@ -1252,24 +1279,12 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                   player: p,
                   opponent: opponent,
                   format: _match.format,
-                  onTap: () {
-                    if (p.source == 'scorecard') {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                            content: Text(
-                                'Profile not available for ${p.name} yet.')),
-                      );
-                      return;
-                    }
-                    Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => PlayerProfileScreen(
-                                player: p,
-                                opponent: opponent,
-                                venueId: _match.venueId,
-                                format: _match.format)));
-                  },
+                  // FIX-7: no hard-block for scorecard rows. Every
+                  // tap routes through _openPlayerByName, which
+                  // fetches the profile (Cricsheet -> provider id
+                  // lookup) instead of refusing outright. Rows with
+                  // no stats yet show "Tap for profile" in the card.
+                  onTap: () => _openPlayerByName(p.name),
                 ),
             ],
           );
