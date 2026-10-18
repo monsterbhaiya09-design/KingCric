@@ -1,128 +1,147 @@
-# KingCric — API Setup (FREE, ₹0)
+# KingCric — API Setup (FREE, ₹0) — MULTI-SOURCE
 
-**Chosen provider: CricAPI / CricketData.org** — `https://api.cricapi.com/v1`
-(first called CricAPI since 2015, now CricketData.org — same API, same
-`api.cricapi.com` base URL, same endpoints).
-
-Why this one first:
-- **Only provider with a lifetime free tier that never expires** — 100
-  hits/day forever, no credit card, no 7/14-day trial that dies.
-- Covers what KingCric needs: live scores, ball-by-ball, full
-  scorecards, player profiles, series, squads.
-- Simple JSON + `?apikey=` query param — no OAuth, no RapidAPI
-  subscription, no SDK to install.
+**One interface, ALL free providers.** Screens call only `ApiService`
+(`fetchMatches`, `fetchScorecard`, `fetchMatchDetail`, `fetchSeries`,
+`fetchPlayer`). Providers live in `lib/services/providers/` — one file
+per provider, all behind the `CricketProvider` interface. Swapping or
+adding a provider never touches a screen.
 
 > Never scrape Cricbuzz / Cricinfo / Crex / Cricmetrics. The app talks
 > ONLY to a provider's documented JSON API. Scraping gets blocked and
 > breaks the app; the API keeps working.
 
-## 1. Get a FREE key (2 minutes)
+## 1. Provider table — what each source provides
 
-1. Go to **https://cricketdata.org** (or https://api.cricapi.com).
-2. Click **Sign up** — email + password, or Sign in with Google.
-3. Open the **Dashboard** — your API key is shown there
-   (looks like `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
-4. Copy it. **Never paste it into chat, never commit it to git.**
-   It travels only via `--dart-define` (below) or the in-app
-   Settings key field (tested with `ApiService.testApiKeyValidity`
-   before saving).
+| # | Provider | Key? | Free quota | Provides | Role |
+|---|---|---|---|---|---|
+| 1 | **CricAPI / CricketData.org** `api.cricapi.com/v1` | Yes — `CRIC_API_KEY` (`?apikey=`) | **100 hits/day, lifetime, no card** | Live scores, full scorecards (batting/bowling/extras/FOW), series, basic player profiles | **PRIMARY** — only full-scorecard source |
+| 2 | **EliteSport** `api.elitesportapi.com/v1` (VERIFY host on dashboard) | Yes — `ELITESPORT_API_KEY` (`x-api-key` header) | Free plan, testing tier — keep ≤90/day | Live matches, scorecard, commentary, player profile, fixtures, series | **SECONDARY** — CricAPI down / capped |
+| 3 | **EntitySport** `rest.entitysport.com/v2` | Yes — `ENTITYSPORT_API_KEY` (`?token=`) | Free dev token: sample completed competitions only | Matches, live, info, competitions | **TERTIARY** — sample/ completed data |
+| 4 | **SportScore** `sportscore.com/api/widget/` | **No key** | ~10,000 req/24h/IP | Live scores, fixtures, standings, top scorers, player stats (scores only) | **KEYLESS BACKSTOP** — needs attribution (see §2) |
+| 5 | **TheSportsDB** `thesportsdb.com/api/v1/json/{key}/` | Test key `123` built in; own key via `SPORTSDB_API_KEY` | ~500/day reported (free registration) | Schedules/fixtures, results, team badges/logos, player bios, league lists, venues | **METADATA BACKSTOP** — not real-time |
 
-## 2. Build / run WITH the key
+**Fallback order:** CricAPI → EliteSport → EntitySport → SportScore →
+TheSportsDB → cache (last verified) → mock demo data (always works
+offline). If a provider fails, is capped, or is unconfigured, the next
+one is tried. No provider can crash the app: every provider returns
+null/[] on any error.
+
+**Cross-check:** the orchestrator compares the primary result against
+any cached other-provider result for shared matches (id → runs/wkts).
+On a mismatch it keeps the primary, logs the mismatch, and never
+replaces verified data with unverified data. It does NOT burn quota
+re-fetching from every provider on every call.
+
+## 2. SportScore attribution (REQUIRED for the free tier)
+
+SportScore's free tier is key-free and generous **on one condition**:
+every surface rendering its data must show a visible
+**"Powered by SportScore"** link. The constant
+`AppConstants.sportScoreAttribution` carries that text. If KingCric
+ever renders SportScore data without the attribution, that provider
+must be disabled. (Commercial / white-label without attribution is
+paid — we do NOT use it.)
+
+## 3. Get keys (all free, none in chat / git)
+
+| Key | How (2 min each) |
+|---|---|
+| `CRIC_API_KEY` | https://cricketdata.org → Sign up → Dashboard → API Keys → copy. Looks like `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`. |
+| `ELITESPORT_API_KEY` | https://elitesportapi.com → Create account → Free plan → dashboard API key → copy. **Also verify the API host** on the dashboard/docs and update `eliteSportBaseUrl` if it differs. |
+| `ENTITYSPORT_API_KEY` | https://entitysport.com → Sign up → dashboard → dev token. EntitySport publishes a sample dev token on its own docs for testing — **do NOT commit it**; use your own token from the dashboard. Dev token covers sample completed competitions only (no full live, no player search/profile/stats). |
+| `SPORTSDB_API_KEY` | Optional. Without it the built-in test key `123` is used. For your own key: https://www.thesportsdb.com → free registration → profile page → copy key. |
+
+**Never paste a key into chat, never commit it to git.** Keys travel
+only via `--dart-define` (below), GitHub repo secrets, or the in-app
+Settings key field (tested with `ApiService.testApiKeyValidity`).
+
+## 4. Build / run WITH the keys
 
 ```bash
 # Run on a phone / emulator with real data:
-flutter run --dart-define=CRIC_API_KEY=YOUR_FREE_KEY
+flutter run \
+  --dart-define=CRIC_API_KEY=YOUR_FREE_KEY \
+  --dart-define=ELITESPORT_API_KEY=YOUR_FREE_KEY \
+  --dart-define=ENTITYSPORT_API_KEY=YOUR_FREE_TOKEN \
+  --dart-define=SPORTSDB_API_KEY=YOUR_KEY
 
 # Build the release APK with real data:
-flutter build apk --release --dart-define=CRIC_API_KEY=YOUR_FREE_KEY
+flutter build apk --release \
+  --dart-define=CRIC_API_KEY=YOUR_FREE_KEY \
+  --dart-define=ELITESPORT_API_KEY=YOUR_FREE_KEY \
+  --dart-define=ENTITYSPORT_API_KEY=YOUR_FREE_TOKEN \
+  --dart-define=SPORTSDB_API_KEY=YOUR_KEY
 ```
 
-GitHub Actions: add the key as a repo secret named `CRIC_API_KEY`
-(Settings → Secrets → Actions → New repository secret), then the
-workflow passes it as `--dart-define=CRIC_API_KEY=${{ secrets.CRIC_API_KEY }}`.
-If the secret is absent, the workflow still builds — the app just runs
-in demo (mock) mode.
+GitHub Actions: add each key as a repo secret with the SAME name
+(Settings → Secrets → Actions → New repository secret):
+`CRIC_API_KEY`, `ELITESPORT_API_KEY`, `ENTITYSPORT_API_KEY`,
+`SPORTSDB_API_KEY` (optional). The workflow passes all four as
+`--dart-define`; a missing secret expands to an empty define, that
+provider is skipped, and **the build must NOT fail**. If no secrets are
+set, the app builds in demo/backstop mode.
 
-## 3. No key = demo mode (still fully usable)
+## 5. No key = demo / backstop mode (still fully usable)
 
-- Without `--dart-define`, `AppConstants.hasApiKey` is false and every
-  `ApiService` method falls back to `MockDataService` (realistic
+- Without any key, CricAPI / EliteSport / EntitySport are skipped.
+  SportScore + TheSportsDB (keyless) still try to answer; if they
+  also fail, every method falls back to `MockDataService` (realistic
   India vs Pakistan / IPL / Big Bash data).
-- The UI must label this clearly as **Demo data** (it already does).
+- The Home screen shows a **Demo** banner until a keyed provider is
+  configured (`ApiService.isLive` = keyed provider present).
 - `testApiKeyValidity()` returns `false` for an empty key — the app
-  stays in demo mode, never crashes.
+  stays in demo/backstop mode, never crashes.
 
-## 4. Endpoints used (CricAPI v1) → KingCric screens
+## 6. Endpoints used → KingCric screens
 
-| CricAPI endpoint | KingCric method | Screen |
+| Provider endpoint | KingCric method | Screen |
 |---|---|---|
-| `GET /currentMatches?apikey=` | `fetchMatches()` | Home — live / upcoming / recent |
-| `GET /cricketScore?apikey=&id=<matchId>` | `fetchScorecard()` + `fetchMatchDetail()` | Match Detail — full scoreboard |
-| `GET /players_info?apikey=&id=<playerId>` | `fetchPlayer()` | Player Profile (basic profile; career / vs-opponent / venue / matchup stats are marked `dataComplete: false` in live mode until a richer source is added — never present partial data as complete) |
-| `GET /series?apikey=&offset=0` | `fetchSeries()` | Leagues — series list |
+| CricAPI `GET /currentMatches?apikey=` | `fetchMatches()` | Home — live / upcoming / recent |
+| CricAPI `GET /cricketScore?apikey=&id=` | `fetchScorecard()` + `fetchMatchDetail()` | Match Detail — full scoreboard |
+| CricAPI `GET /players_info?apikey=&id=` | `fetchPlayer()` | Player Profile (basic profile; deep stats flagged `dataComplete: false`) |
+| CricAPI `GET /series?apikey=&offset=0` | `fetchSeries()` | Leagues — series list |
+| EliteSport `GET /matches/live`, `/matches/{id}/scorecard`, `/fixtures`, `/players/{id}` | same methods (fallback) | Same screens |
+| EntitySport `GET /matches?token=`, `/matches/{id}/info?token=`, `/competitions?token=` | same methods (fallback) | Same screens |
+| SportScore `GET /api/widget/cricket/matches` (+ live) | `fetchMatches()` (scores only) | Home — backstop scores |
+| TheSportsDB `livescore.php?s=Cricket`, `search_all_leagues.php?s=Cricket`, `lookupplayer.php` | `fetchMatches()` / `fetchSeries()` / `fetchPlayer()` (metadata) | Home / Leagues / Player (metadata) |
 
-Response envelope (all endpoints):
-```json
-{"status": "success", "info": {"hitsToday": 12, "hitsLimit": 100, "hitsLeft": 88}, "data": [...]}
-```
-`status: "failure"` + HTTP 400 = bad / exhausted key → the app falls
-back to cached data, then mock data. The `info.hitsLeft` field is the
-quota meter — log it, don't ignore it.
+Response envelopes:
+- CricAPI: `{"status":"success","info":{"hitsToday":12,"hitsLimit":100,"hitsLeft":88},"data":[...]}`. `status:"failure"` + HTTP 400 = bad / exhausted key → fallback.
+- EntitySport: `{status:"ok", response:{items:[...]}}`.
+- TheSportsDB: `{events:[...]}` / `{teams:[...]}` / `{players:[...]}`.
+- SportScore / EliteSport: `{data:[...]}` (or bare list). All parsers
+  accept several envelope shapes and default missing fields to empty/0.
 
-`cricketScore` scorecard shape (mapped in `_matchFromScorecard`):
-`data.scorecard[]` → `{inning, batting:[{batter, dismissal, r, b, 4s, 6s, sr}], bowling:[{bowler, o, m, r, w, eco, wd, nb}], extras:{r, b, lb, wd, nb}, fallofwickets:[{name, score, over}], total, wickets, overs}`.
-Fields the provider omits default to empty/0 — a partial response can
-never crash the scoreboard.
-
-## 5. Quota budget (100 hits/day) — DO NOT POLL EVERY 45 SECONDS
+## 7. Quota budget — DO NOT POLL EVERY 45 SECONDS
 
 Old code polled every 45 s. That is **~1,920 calls/day** — 19× the
-free quota. The key would die before lunch and the app would go dark
-for every user that day.
+CricAPI free quota. The key would die before lunch and the app would
+go dark for every user that day.
 
 New quota-safe policy (enforced in code, not just docs):
 
 | What | Interval | Calls/day (worst case) |
 |---|---|---|
-| Live match list (`currentMatches`) | **10 min** cache + manual Refresh | ~60 if the app ran 10 h straight |
-| Live match detail (`cricketScore`) | **10 min** cache | shares the same budget — detail is only fetched for the open match |
+| Live match list | **10 min** cache + manual Refresh | ~60 if the app ran 10 h straight |
+| Live match detail / scorecard | **10 min** cache | shares the same budget — detail only for the open match |
 | Completed match detail / scorecard | **60 min** cache (finished data never changes) | ~1 per match, once |
 | Series list | **60 min** cache | ~a few |
 | Match just finished | **+1 extra fetch** (AutoUpdateService fires once on live→completed transition) | +1 per finished match |
 | Player profile | **60 min** cache per player | ~1 per profile open |
 
-Realistic day: **20–40 hits** — comfortably inside 100. A user who
-leaves the app open all day still cannot burn the quota, because the
-cache — not the timer — gates the calls.
+Per-provider daily self-caps (in code, below provider limits):
+CricAPI 90/100, SportScore 500/~10,000, TheSportsDB 400/~500,
+EliteSport 90 (testing tier), EntitySport 90 (dev token).
+Realistic day: **20–40 hits on the primary** — comfortably inside 100.
 
 `AutoUpdateService` uses `AppConstants.livePollInterval` (10 min).
 The "45-second polling" idea is **rejected** — it is recorded here so
 nobody reintroduces it.
 
-## 6. Alternatives (if CricAPI ever goes down)
-
-All are **paid-first** — listed only as fallbacks, NOT the default.
-KingCric stays 100% free: if the primary key is exhausted, the app
-falls back to cache → mock data, it never asks the user to pay.
-
-| Provider | Free offer | Why not primary |
-|---|---|---|
-| **SportScore** (sportscore.com) | Free, CORS-open, no key for open-source projects | Cricket coverage is thinner than CricAPI; good backstop for scores only |
-| **EliteSport API** (elitesportapi.com) | Free tier "for testing", `GET /matches/live`, `/matches/{id}/scorecard`, `/matches/{id}/commentary`, `/players/{id}`, `/fixtures`, `/series/{id}` via `x-api-key` header | Free tier is testing-only; paid plans $199+/mo — not free for production |
-| **Sportmonks** (sportmonks.com) | **14-day free trial only**, then from €29/mo, 2,000 calls/hour/endpoint | Trial expires; not lifetime-free |
-| **Roanuz** (sports.roanuz.com) | **No free tier**, free trial only, plans from ~₹17,669/mo (~$210/mo) | Not free at all |
-| **RapidAPI / getcricketapi.com** (CricBuzz-derived) | 7-day trial, 50 units, then $19.99/mo | Trial expires; not lifetime-free |
-| **EntitySport** (entitysport.com) | Free dev token, then $150/mo+ | Not free for production |
-| **TheSportsDB** (thesportsdb.com) | Free for personal use, no key for basic endpoints | Schedules / logos / basic metadata only — NOT real-time-grade, no ball-by-ball |
-
-If a fallback is ever wired in, it goes behind the same `ApiService`
-interface (same methods, same cache, same `dataComplete` flag) so
-screens never learn which provider answered.
-
-## 7. Verify the key works (before shipping)
+## 8. Verify the keys work (before shipping)
 
 ```bash
-# 1. Key valid? (in-app: Settings → Test key, or curl)
+# 1. CricAPI key valid? (in-app: Settings → Test key, or curl)
 curl "https://api.cricapi.com/v1/currentMatches?apikey=YOUR_FREE_KEY" | head -c 400
 # Expect: {"status":"success", ...}  —  "failure" = bad key.
 
@@ -132,18 +151,50 @@ flutter run --dart-define=CRIC_API_KEY=YOUR_FREE_KEY
 # 3. Quota check: after a day of use, the provider dashboard
 #    "hitsToday" must stay < 100. If it hits 100, the cache TTLs above
 #    were bypassed somewhere — search for direct http.get calls.
+#    (Only ApiService/providers may call http — grep to confirm.)
 ```
 
-## 8. What is NOT ready (honest limits)
+## 9. What is NOT ready (honest limits)
 
-- **Live ball-by-ball is 10-min cached**, not sub-second. The free tier
-  cannot support faster polling (see §5). Paid tiers / push feeds
-  would be needed for true real-time — out of scope for the ₹0 build.
+- **Live ball-by-ball is 10-min cached**, not sub-second. No free tier
+  supports faster polling (see §7). Paid tiers / push feeds would be
+  needed for true real-time — out of scope for the ₹0 build.
 - **Player career / vs-opponent / venue / matchup stats in live mode**
-  come from the free provider's basic profile only. Deep analytics
-  still use the curated dataset and are flagged `dataComplete: false`
-  in live mode — the app never presents them as live-verified.
+  come from the free providers' basic profiles only. NO free provider
+  in this set returns deep career / vs-opponent / venue / bowler-vs-
+  batter history. Those sections still use the curated dataset and
+  are flagged `dataComplete: false` in live mode — the app never
+  presents them as live-verified. Wiring a richer free source for
+  deep stats (if one is found and verified) goes behind the same
+  `CricketProvider` interface.
+- **EliteSport base URL is UNVERIFIED** (see §1). Until it is confirmed
+  against the dashboard/docs, that provider may silently return null.
+  That is safe (fallback works) but means it may contribute nothing.
+- **EntitySport dev token covers sample completed competitions only**
+  — no full live coverage, no player endpoints. It is a tertiary
+  backstop, not a live source.
+- **TheSportsDB free livescore is delayed** (2-min livescores are a
+  premium feature). It is a metadata/schedule backstop, not live.
+- **SportScore has no full innings scorecard** in the widget API —
+  scores only. Full scorecards come only from CricAPI (or EliteSport
+  once verified).
 - **Background updates when the app is closed** need WorkManager /
   Firebase Functions (free tier) — planned, not in this build.
 - **Push notifications (FCM)** need a Firebase project — planned, not
   in this build.
+- **Paid-only providers are NOT used as primary:** Sportmonks (14-day
+  trial, then €29/mo), Roanuz (no free tier, ~₹17,669/mo), RapidAPI /
+  CricBuzz-derived (7-day trial, then $19.99/mo), Sportradar
+  (enterprise only), DataSportsGroup (no free tier). SportXAPI has a
+  free $0/100-calls tier (matches, H2H, standings, teams, players) —
+  a possible future provider behind the same interface, not wired yet.
+
+## 10. Adding a new provider (no rebuild of screens)
+
+1. Add `lib/services/providers/<name>_provider.dart` implementing
+   `CricketProvider` (never throw, never hard-code a key, respect
+   its daily cap, parse defensively).
+2. Add its key constant to `AppConstants` (`String.fromEnvironment`).
+3. Register it in `ApiService`'s provider list (order = priority).
+4. Add its row to §1, its key to §3, its secrets to §4, its limits
+   to §9. Done — screens never change.
