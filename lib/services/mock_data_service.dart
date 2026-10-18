@@ -659,6 +659,7 @@ class MockDataService {
         teamBWinsH2H: 3,
         totalH2H: 18,
         lastUpdated: _now,
+        source: 'demo',
       );
 
   CricketMatch _iplCompleted() => CricketMatch(
@@ -685,6 +686,7 @@ class MockDataService {
         teamBWinsH2H: 17,
         totalH2H: 38,
         lastUpdated: _now,
+        source: 'demo',
       );
 
   CricketMatch _bblUpcoming() => CricketMatch(
@@ -704,5 +706,6 @@ class MockDataService {
         teamBWinsH2H: 11,
         totalH2H: 20,
         lastUpdated: _now,
+        source: 'demo',
       );
 }
