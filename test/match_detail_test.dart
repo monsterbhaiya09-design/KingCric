@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:kingcric/models/innings.dart';
 import 'package:kingcric/models/match.dart';
 import 'package:kingcric/screens/match_detail_screen.dart';
+import 'package:kingcric/services/cricsheet_service.dart';
 import 'package:kingcric/services/mock_data_service.dart';
 import 'package:kingcric/utils/strings.dart';
 
@@ -13,6 +14,18 @@ import 'package:kingcric/utils/strings.dart';
 // unit-testable without pumping the whole screen.
 
 void main() {
+  // MERGE-LEAD: warm the parse-once Cricsheet cache ONCE in setUpAll
+  // (real zone, before any test's fake-async starts). Do NOT warm it
+  // with tester.runAsync inside a test: runAsync deadlocks when a
+  // previous test pumped MatchDetailScreen (its initState fires
+  // provider work), and the Squad tab's asset-load future then never
+  // completes — the Squad test hung 100s+ and the whole file failed
+  // on shutdown. setUpAll warm-up makes every test await an
+  // already-completed future, so no test needs runAsync.
+  setUpAll(() async {
+    await CricsheetService.loadBundled();
+  });
+
   group('cricket overs conversion', () {
     test('3.2 overs = 20 balls, not 3.2*6 = 19.2', () {
       expect(ballsFromCricketOvers(3.2), 20);
@@ -136,6 +149,9 @@ void main() {
     testWidgets('Squad tab splits Team A / Team B sections',
         (tester) async {
       final match = demoMatch();
+      // Cricsheet cache is warmed once in setUpAll (see top of file)
+      // — no per-test runAsync warm-up (it deadlocks after a previous
+      // test pumped this screen).
       await tester.pumpWidget(wrap(MatchDetailScreen(match: match)));
       await tester.pump();
       await tester.tap(find.text('Squad'));
