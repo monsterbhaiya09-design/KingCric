@@ -114,8 +114,12 @@ class PlayerCard extends StatelessWidget {
                       builder: (_) {
                         final isReal =
                             player.source == 'cricsheet';
-                        final isDemo = player.source == 'demo' ||
-                            (!isReal && !player.dataComplete);
+                        // Source labels are by PROVENANCE, not by
+                        // completeness: a provider partial profile is
+                        // Partial, never "Demo" (demo = curated
+                        // sample only). Labelling a partial as Demo
+                        // understates real provider data.
+                        final isDemo = player.source == 'demo';
                         final label = isReal
                             ? 'Real • Cricsheet'
                             : isDemo
