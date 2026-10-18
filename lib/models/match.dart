@@ -65,6 +65,10 @@ class CricketMatch {
   final String umpires;
   final String matchReferee;
   final String pitchReport;
+  /// Which provider supplied this match ('CricAPI', 'SportScore',
+  /// 'demo', ...). Rendered as a tiny per-card source label so demo
+  /// data can never masquerade as real. '' = unknown (older cache).
+  final String source;
 
   const CricketMatch({
     required this.id,
@@ -93,6 +97,7 @@ class CricketMatch {
     this.umpires = '',
     this.matchReferee = '',
     this.pitchReport = '',
+    this.source = '',
   });
 
   String get title => '$teamA vs $teamB';
@@ -165,6 +170,7 @@ class CricketMatch {
       umpires: j['umpires'] as String? ?? '',
       matchReferee: j['matchReferee'] as String? ?? '',
       pitchReport: j['pitchReport'] as String? ?? '',
+      source: j['source'] as String? ?? '',
       lastUpdated: j['lastUpdated'] == null
           ? null
           : DateTime.tryParse(j['lastUpdated'] as String),
@@ -197,6 +203,7 @@ class CricketMatch {
         'umpires': umpires,
         'matchReferee': matchReferee,
         'pitchReport': pitchReport,
+        'source': source,
         'lastUpdated': lastUpdated?.toIso8601String(),
       };
 }
