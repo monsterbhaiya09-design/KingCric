@@ -44,3 +44,9 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # Cricsheet open-data sample (4 T20 internationals, Cricsheet JSON
+    # v1.3.0 shape). Parsed by CricsheetService for REAL calculated
+    # player stats offline. Full dataset = all_json.zip download
+    # (see CRICSHEET-DATA.md). Never scrape Cricbuzz/Cricinfo.
+    - assets/cricsheet_sample.json
