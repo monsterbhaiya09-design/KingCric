@@ -22,6 +22,12 @@ class PredictionEngine {
   static const double wMatchup = 0.15;
   static const double wPitch = 0.10;
 
+  /// NaN / Infinity guard: upstream averages can be NaN when a
+  /// provider divides 0/0. A NaN sub-score must become the neutral
+  /// 50, never propagate into the total (NaN total -> NaN UI).
+  static double _safe(double v, [double fallback = 50]) =>
+      v.isFinite ? v : fallback;
+
   static Prediction predict({
     required Player player,
     required String opponent,
@@ -33,40 +39,52 @@ class PredictionEngine {
     final vsOpp = player.battingVs(opponent);
     final venueStats = player.battingByVenue[venueId];
 
-    final formScore = _formScore(player);
-    final oppScore = _relativeScore(
-      vsOpp.average, career.average,
-      fallback: vsOpp.matches == 0 ? 50 : 50,
-    );
+    // No data at all (no career, no form, no matchup) = no prediction.
+    // The UI shows "Not enough data" instead of a fake 50.
+    final hasAnySignal = career.matches > 0 ||
+        player.recentForm.isNotEmpty ||
+        player.matchups.isNotEmpty;
+
+    final formScore = _safe(_formScore(player));
+    final oppScore = _safe(_relativeScore(
+      _safe(vsOpp.average, 0),
+      _safe(career.average, 0),
+      fallback: 50,
+    ));
     final double venueScore = venueStats == null
         ? 50.0
-        : _relativeScore(venueStats.average, career.average, fallback: 50);
-    final matchupScore = _matchupScore(player);
-    final double pitchScore =
-        pitchBattingFriendliness.clamp(0, 100).toDouble();
+        : _safe(_relativeScore(
+            _safe(venueStats.average, 0), _safe(career.average, 0),
+            fallback: 50));
+    final matchupScore = _safe(_matchupScore(player));
+    final double pitchScore = _safe(pitchBattingFriendliness, 55).clamp(0, 100).toDouble();
 
-    final total = formScore * wForm +
+    final total = _safe(formScore * wForm +
         oppScore * wOpponent +
         venueScore * wVenue +
         matchupScore * wMatchup +
-        pitchScore * wPitch;
+        pitchScore * wPitch);
 
-    final en = _explainEn(
-      player: player,
-      opponent: opponent,
-      form: formScore,
-      opp: oppScore,
-      venue: venueScore,
-      matchup: matchupScore,
-    );
-    final hi = _explainHi(
-      player: player,
-      opponent: opponent,
-      form: formScore,
-      opp: oppScore,
-      venue: venueScore,
-      matchup: matchupScore,
-    );
+    final en = hasAnySignal
+        ? _explainEn(
+            player: player,
+            opponent: opponent,
+            form: formScore,
+            opp: oppScore,
+            venue: venueScore,
+            matchup: matchupScore,
+          )
+        : '${player.name}: Not enough data to predict.';
+    final hi = hasAnySignal
+        ? _explainHi(
+            player: player,
+            opponent: opponent,
+            form: formScore,
+            opp: oppScore,
+            venue: venueScore,
+            matchup: matchupScore,
+          )
+        : '${player.name}: भविष्यवाणी के लिए पर्याप्त डेटा नहीं है।';
 
     return Prediction(
       playerId: player.id,
@@ -82,6 +100,7 @@ class PredictionEngine {
       pitchScore: pitchScore,
       explanationEn: en,
       explanationHi: hi,
+      hasData: hasAnySignal,
     );
   }
 
@@ -109,8 +128,11 @@ class PredictionEngine {
   /// Score 0-100: how much better/worse is [value] than [baseline]?
   static double _relativeScore(double value, double baseline,
       {required double fallback}) {
-    if (baseline <= 0) return fallback;
+    if (!value.isFinite || !baseline.isFinite || baseline <= 0) {
+      return fallback;
+    }
     final ratio = value / baseline;
+    if (!ratio.isFinite) return fallback;
     return (50 * ratio).clamp(5, 95).toDouble();
   }
 
