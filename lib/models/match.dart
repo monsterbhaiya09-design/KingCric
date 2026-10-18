@@ -99,6 +99,20 @@ class CricketMatch {
   bool get isLive => status == MatchStatus.live;
   bool get isCompleted => status == MatchStatus.completed;
 
+  /// Defense-in-depth for the Live tab (V3 bug): if a provider ever
+  /// mislabels an in-progress match as upcoming, the scores on the
+  /// board still prove it is live — unless the result says someone
+  /// won. The Home filter uses this, not the raw [status], so a
+  /// live match can never again hide under Upcoming.
+  bool get isEffectivelyLive {
+    if (status == MatchStatus.live) return true;
+    if (status != MatchStatus.upcoming) return false;
+    final won = result.toLowerCase().contains('won by') ||
+        result.toLowerCase().contains('won the');
+    if (won) return false;
+    return scores.any((s) => s.batted && (s.runs > 0 || s.wickets > 0));
+  }
+
   TeamScore? scoreOf(String team) {
     for (final s in scores) {
       if (s.team == team) return s;
