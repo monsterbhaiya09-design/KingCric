@@ -78,13 +78,25 @@ class SportScoreProvider implements CricketProvider {
     if (home.isEmpty || away.isEmpty) return null;
     final statusRaw = ProviderParsing.toStr(
         m['status'] ?? m['state'] ?? m['match_status'] ?? '');
-    final status = ProviderParsing.statusFromText(statusRaw);
     // Scores: {home: "192/6", away: ...} or score {home, away} or flat.
     final scoreMap = (m['score'] as Map?)?.cast<String, dynamic>();
     final homeScore = ProviderParsing.parseScoreString(
         scoreMap?['home'] ?? m['home_score'] ?? m['homeScore']);
     final awayScore = ProviderParsing.parseScoreString(
         scoreMap?['away'] ?? m['away_score'] ?? m['awayScore']);
+    // MAIN-CORE FIX: resolve with the REAL hasScores. The old
+    // statusFromText always passed hasScores=false, so a live
+    // backstop match with a non-keyword status ("1st innings")
+    // was parsed as upcoming and only rescued at display time by
+    // isEffectivelyLive — its status field stayed wrong for the
+    // merge, the pill and the TTL. Scores + no result = live.
+    final status = ProviderParsing.resolveStatus(
+      raw: statusRaw,
+      hasScores: homeScore.$1 > 0 ||
+          homeScore.$2 > 0 ||
+          awayScore.$1 > 0 ||
+          awayScore.$2 > 0,
+    );
     final scores = <TeamScore>[];
     if (homeScore.$1 > 0 || status != MatchStatus.upcoming) {
       scores.add(TeamScore(
