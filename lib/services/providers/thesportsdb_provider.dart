@@ -74,8 +74,10 @@ class TheSportsDbProvider implements CricketProvider {
   }
 
   CricketMatch? _matchFromEvent(Map<String, dynamic> e) {
-    final home = ProviderParsing.toStr(e['strHomeTeam']);
-    final away = ProviderParsing.toStr(e['strAwayTeam']);
+    final home =
+        ProviderParsing.titleCaseTeam(ProviderParsing.toStr(e['strHomeTeam']));
+    final away =
+        ProviderParsing.titleCaseTeam(ProviderParsing.toStr(e['strAwayTeam']));
     if (home.isEmpty || away.isEmpty) return null;
     final statusRaw = ProviderParsing.toStr(
         e['strStatus'] ?? e['strProgress'] ?? '');
@@ -199,6 +201,7 @@ class TheSportsDbProvider implements CricketProvider {
       role: ProviderParsing.toStr(p['strPosition'] ?? 'Batter'),
       country: ProviderParsing.toStr(p['strNationality'] ?? ''),
       dataComplete: false,
+      source: 'thesportsdb',
       lastUpdated: DateTime.now(),
     );
   }
