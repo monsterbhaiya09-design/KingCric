@@ -80,7 +80,10 @@ class EliteSportProvider implements CricketProvider {
     if (home.isEmpty || away.isEmpty) return null;
     final statusRaw =
         ProviderParsing.toStr(m['status'] ?? m['match_status'] ?? '');
-    final status = ProviderParsing.statusFromText(statusRaw);
+    // SQUAD D: status is resolved AFTER scores are parsed, with the
+    // REAL hasScores. The old statusFromText call passed
+    // hasScores=false, so a live match whose status text said
+    // "Scheduled" was filed as upcoming despite runs on the board.
     // Score may be nested {home:{runs,wickets,overs}, away:{...}} or
     // flat strings "192/6".
     Map<String, dynamic>? scoreMap;
@@ -112,6 +115,13 @@ class EliteSportProvider implements CricketProvider {
         awayWkts = p.$2;
       }
     }
+    final status = ProviderParsing.resolveStatus(
+      raw: statusRaw,
+      hasScores: ProviderParsing.scoresPresent(
+              runs: homeRuns, wickets: homeWkts, overs: homeOvers) ||
+          ProviderParsing.scoresPresent(
+              runs: awayRuns, wickets: awayWkts, overs: awayOvers),
+    );
     return CricketMatch(
       id: ProviderParsing.toStr(m['id'] ?? m['match_id'] ?? m['matchId']),
       teamA: home,
@@ -155,15 +165,22 @@ class EliteSportProvider implements CricketProvider {
   Future<List<CricketMatch>?> fetchMatches() async {
     final body = await _getJson('/matches/live');
     if (body == null) return null;
-    final parsed =
-        _list(body).map(_matchFromGeneric).whereType<CricketMatch>().toList();
-    debugPrint('KingCric [EliteSport] fetchMatches: kept=${parsed.length}');
+    final received = _list(body);
+    final parsed = received
+        .map(_matchFromGeneric)
+        .whereType<CricketMatch>()
+        .toList();
+    debugPrint('KingCric [EliteSport] fetchMatches: received=${received.length} dropped=${received.length - parsed.length} kept=${parsed.length}');
     if (parsed.isNotEmpty) return parsed;
     // No live matches: try fixtures for upcoming.
     final fix = await _getJson('/fixtures');
     if (fix == null) return null;
-    final parsedFix =
-        _list(fix).map(_matchFromGeneric).whereType<CricketMatch>().toList();
+    final receivedFix = _list(fix);
+    final parsedFix = receivedFix
+        .map(_matchFromGeneric)
+        .whereType<CricketMatch>()
+        .toList();
+    debugPrint('KingCric [EliteSport] fetchMatches fixtures: received=${receivedFix.length} dropped=${receivedFix.length - parsedFix.length} kept=${parsedFix.length}');
     return parsedFix.isEmpty ? null : parsedFix;
   }
 
@@ -171,13 +188,14 @@ class EliteSportProvider implements CricketProvider {
   Future<List<CricketMatch>?> fetchUpcoming() async {
     final fix = await _getJson('/fixtures');
     if (fix == null) return null;
+    final received = _list(fix);
     final parsed =
-        _list(fix).map(_matchFromGeneric).whereType<CricketMatch>().toList();
+        received.map(_matchFromGeneric).whereType<CricketMatch>().toList();
     final upcoming = parsed
         .where((m) =>
             m.status == MatchStatus.upcoming && !m.isEffectivelyLive)
         .toList();
-    debugPrint('KingCric [EliteSport] fetchUpcoming: received=${parsed.length} kept=${upcoming.length}');
+    debugPrint('KingCric [EliteSport] fetchUpcoming: received=${received.length} dropped=${received.length - upcoming.length} kept=${upcoming.length}');
     return upcoming.isEmpty ? null : upcoming;
   }
 
