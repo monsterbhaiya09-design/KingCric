@@ -92,10 +92,14 @@ class SportScoreProvider implements CricketProvider {
     // merge, the pill and the TTL. Scores + no result = live.
     final status = ProviderParsing.resolveStatus(
       raw: statusRaw,
-      hasScores: homeScore.$1 > 0 ||
-          homeScore.$2 > 0 ||
-          awayScore.$1 > 0 ||
-          awayScore.$2 > 0,
+      hasScores: ProviderParsing.scoresPresent(
+              runs: homeScore.$1,
+              wickets: homeScore.$2,
+              overs: ProviderParsing.toDouble(m['home_overs'])) ||
+          ProviderParsing.scoresPresent(
+              runs: awayScore.$1,
+              wickets: awayScore.$2,
+              overs: ProviderParsing.toDouble(m['away_overs'])),
     );
     final scores = <TeamScore>[];
     if (homeScore.$1 > 0 || status != MatchStatus.upcoming) {
@@ -155,11 +159,12 @@ class SportScoreProvider implements CricketProvider {
       final body = await _getJson(
           Uri.parse('${AppConstants.sportScoreBaseUrl}/$path'));
       if (body == null) continue;
-      final parsed = _matchList(body)
+      final received = _matchList(body);
+      final parsed = received
           .map(_matchFromGeneric)
           .whereType<CricketMatch>()
           .toList();
-      debugPrint('KingCric [SportScore] fetchMatches: path=$path kept=${parsed.length}');
+      debugPrint('KingCric [SportScore] fetchMatches: path=$path received=${received.length} dropped=${received.length - parsed.length} kept=${parsed.length}');
       if (parsed.isNotEmpty) return parsed;
     }
     return null;
