@@ -1,10 +1,10 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../../models/innings.dart';
 import '../../models/match.dart';
 import '../../models/player.dart';
 import '../../utils/constants.dart';
-import '../mock_data_service.dart';
 import 'cricket_provider.dart';
 
 /// PRIMARY provider: CricAPI / CricketData.org.
@@ -14,10 +14,28 @@ import 'cricket_provider.dart';
 /// Envelope: {"status":"success","info":{...},"data":[...]}.
 /// Moved verbatim from the old single-provider ApiService so behaviour
 /// is unchanged; the orchestrator now calls this via the interface.
+///
+/// FIX-7 changes (see FIX7.md):
+/// - fetchUpcoming / fetchSeries PAGINATE (offset loop, capped pages)
+///   instead of fetching only `offset=0` page 1.
+/// - Server-side quota is read from every response's `info` block
+///   (`hitsLeft` / `hitsToday`); the provider stops calling once the
+///   server says the quota is exhausted. In-memory counters alone are
+///   NOT trusted — the server counts hits from every session.
+/// - fetchPlayer takes the provider's NUMERIC player id (never a
+///   display name). [resolvePlayerId] maps a name to that id, and
+///   the old `_mock.playerById` hard-gate (which returned null for
+///   every player outside 6 mock ids) is GONE.
+/// - Every fetch debug-logs received / dropped / kept counts (never
+///   the key) so a future "half matches" report is diagnosable.
 class CricApiProvider implements CricketProvider {
   final http.Client _client;
-  final MockDataService _mock = MockDataService();
   int _hits = 0;
+
+  /// Server-side quota from the last response's `info` block.
+  int? _serverHitsLeft;
+  int? _serverHitsToday;
+  bool _quotaError = false;
 
   CricApiProvider({http.Client? client}) : _client = client ?? http.Client();
 
@@ -33,7 +51,59 @@ class CricApiProvider implements CricketProvider {
   @override
   int get hitsToday => _hits;
 
-  bool get _capped => _hits >= dailyCap;
+  @override
+  int? get serverHitsLeft => _serverHitsLeft;
+
+  @override
+  bool get quotaExhausted => _quotaError || _serverHitsLeft == 0;
+
+  bool get _capped => _hits >= dailyCap || quotaExhausted;
+
+  /// Page step for offset pagination. The server's real page size is
+  /// not documented publicly; stepping by 25 is safe either way —
+  /// overlapping pages are deduped by id, and the loop also stops
+  /// when a page adds zero NEW entries (server ignoring `offset`).
+  static const int _pageSize = 25;
+
+  /// Hard quota guard: pagination never fetches more than this many
+  /// pages per call (fixtures: 5, series: 3). Upcoming is cached
+  /// 60 min by the orchestrator, so worst case is ~5 hits/hour.
+  static const int _maxUpcomingPages = 5;
+  static const int _maxSeriesPages = 3;
+
+  void _log(String method,
+      {required int received, required int dropped, required int kept}) {
+    debugPrint(
+        'KingCric [CricAPI] $method: received=$received dropped=$dropped kept=$kept');
+  }
+
+  /// Read the server-side quota out of a response envelope. Never
+  /// throws, never logs the key. A `failure` status whose message
+  /// mentions quota / credits / limit marks the quota exhausted.
+  void _updateQuota(Map<String, dynamic> body) {
+    try {
+      final info = (body['info'] as Map?)?.cast<String, dynamic>();
+      if (info != null) {
+        final left = info['hitsLeft'];
+        if (left is num) _serverHitsLeft = left.toInt();
+        final today = info['hitsToday'];
+        if (today is num) _serverHitsToday = today.toInt();
+      }
+      if (body['status'] == 'failure') {
+        final msg = '${body['message'] ?? body['error'] ?? ''}'.toLowerCase();
+        if (msg.contains('quota') ||
+            msg.contains('credit') ||
+            msg.contains('limit') ||
+            msg.contains('exceed')) {
+          _quotaError = true;
+          _serverHitsLeft = 0;
+        }
+      }
+    } catch (_) {}
+  }
+
+  /// Exposed for tests: server-side hits today as last reported.
+  int? get serverHitsToday => _serverHitsToday;
 
   Future<http.Response?> _get(Uri uri) async {
     if (_capped) return null;
@@ -55,6 +125,7 @@ class CricApiProvider implements CricketProvider {
       final res = await _client.get(uri).timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) return false;
       final body = jsonDecode(res.body) as Map<String, dynamic>;
+      _updateQuota(body);
       return body['status'] == 'success';
     } catch (_) {
       return false;
@@ -70,14 +141,20 @@ class CricApiProvider implements CricketProvider {
     if (res == null || res.statusCode != 200) return null;
     try {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
+      _updateQuota(body);
       if (body['status'] == 'failure') return null;
       final list = (body['data'] as List?) ?? [];
       final parsed = <CricketMatch>[];
+      var dropped = 0;
       for (final e in list) {
         try {
           parsed.add(_matchFromFreeApi((e as Map).cast<String, dynamic>()));
-        } catch (_) {}
+        } catch (_) {
+          dropped++;
+        }
       }
+      _log('fetchMatches',
+          received: list.length, dropped: dropped, kept: parsed.length);
       return parsed.isEmpty ? null : parsed;
     } catch (_) {
       return null;
@@ -85,40 +162,66 @@ class CricApiProvider implements CricketProvider {
   }
 
   /// Upcoming fixtures via /v1/matches (the endpoint /currentMatches
-  /// never returns). CricAPI /matches returns upcoming + recent
-  /// matches; we keep only the not-started ones here so the
-  /// orchestrator's Upcoming tab is real, not empty. Called at most
-  /// once per hour by the orchestrator (60-min upcoming cache) so
-  /// this costs ~1 extra CricAPI hit/hour, not one per refresh.
+  /// never returns). PAGINATED: loops `offset = 0, 25, 50, ...` until
+  /// a short page, a page with zero NEW entries, or the page cap.
+  /// The old code fetched only `offset=0` page 1, so every fixture
+  /// beyond page 1 was unreachable — the "Upcoming half / only 24th"
+  /// bug. Called at most once per hour by the orchestrator (60-min
+  /// upcoming cache) so this costs a few CricAPI hits/hour, not one
+  /// per refresh.
   @override
   Future<List<CricketMatch>?> fetchUpcoming() async {
     if (!isConfigured || _capped) return null;
-    final uri = Uri.parse(
-        '${AppConstants.cricApiBaseUrl}/matches?apikey=${AppConstants.cricApiKey}&offset=0');
-    final res = await _get(uri);
-    if (res == null || res.statusCode != 200) return null;
-    try {
-      final body = jsonDecode(res.body) as Map<String, dynamic>;
-      if (body['status'] == 'failure') return null;
-      final list = (body['data'] as List?) ?? [];
-      final parsed = <CricketMatch>[];
-      for (final e in list) {
-        try {
-          final m =
-              _matchFromFreeApi((e as Map).cast<String, dynamic>());
-          // Keep only genuinely not-started fixtures. Anything with
-          // scores / a result is a live/completed match that belongs
-          // in the main list, not Upcoming.
-          if (m.status == MatchStatus.upcoming &&
-              !m.isEffectivelyLive) {
-            parsed.add(m);
+    final seenIds = <String>{};
+    final parsed = <CricketMatch>[];
+    var totalReceived = 0;
+    var totalDropped = 0;
+    for (var page = 0; page < _maxUpcomingPages; page++) {
+      if (_capped) break;
+      final offset = page * _pageSize;
+      final uri = Uri.parse(
+          '${AppConstants.cricApiBaseUrl}/matches?apikey=${AppConstants.cricApiKey}&offset=$offset');
+      final res = await _get(uri);
+      if (res == null || res.statusCode != 200) break;
+      try {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        _updateQuota(body);
+        if (body['status'] == 'failure') break;
+        final list = (body['data'] as List?) ?? [];
+        totalReceived += list.length;
+        var newInPage = 0;
+        for (final e in list) {
+          try {
+            final m =
+                _matchFromFreeApi((e as Map).cast<String, dynamic>());
+            // Keep only genuinely not-started fixtures. Anything with
+            // scores / a result is a live/completed match that belongs
+            // in the main list, not Upcoming.
+            if (m.status == MatchStatus.upcoming &&
+                !m.isEffectivelyLive) {
+              // Pagination overlap (server page size > step, or
+              // server ignoring offset): same id twice = one entry.
+              if (m.id.isNotEmpty && !seenIds.add(m.id)) {
+                totalDropped++;
+                continue;
+              }
+              parsed.add(m);
+              newInPage++;
+            }
+          } catch (_) {
+            totalDropped++;
           }
-        } catch (_) {}
+        }
+        // Short page = last page. Zero NEW entries = server ignored
+        // `offset` (would loop the same page forever) — stop.
+        if (list.length < _pageSize || newInPage == 0) break;
+      } catch (_) {
+        break;
       }
-      return parsed.isEmpty ? null : parsed;
-    } catch (_) {
-      return null;
     }
+    _log('fetchUpcoming',
+        received: totalReceived, dropped: totalDropped, kept: parsed.length);
+    return parsed.isEmpty ? null : parsed;
   }
 
   @override
@@ -130,9 +233,11 @@ class CricApiProvider implements CricketProvider {
     if (res == null || res.statusCode != 200) return null;
     try {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
+      _updateQuota(body);
       if (body['status'] == 'failure') return null;
       final data = (body['data'] as Map?)?.cast<String, dynamic>();
       if (data == null || data.isEmpty) return null;
+      _log('fetchScorecard', received: 1, dropped: 0, kept: 1);
       return _matchFromScorecard(data);
     } catch (_) {
       return null;
@@ -142,72 +247,388 @@ class CricApiProvider implements CricketProvider {
   @override
   Future<List<Map<String, dynamic>>?> fetchSeries() async {
     if (!isConfigured || _capped) return null;
+    final seenIds = <String>{};
+    final parsed = <Map<String, dynamic>>[];
+    var totalReceived = 0;
+    for (var page = 0; page < _maxSeriesPages; page++) {
+      if (_capped) break;
+      final offset = page * _pageSize;
+      final uri = Uri.parse(
+          '${AppConstants.cricApiBaseUrl}/series?apikey=${AppConstants.cricApiKey}&offset=$offset');
+      final res = await _get(uri);
+      if (res == null || res.statusCode != 200) break;
+      try {
+        final body = jsonDecode(res.body) as Map<String, dynamic>;
+        _updateQuota(body);
+        if (body['status'] == 'failure') break;
+        final list = (body['data'] as List?) ?? [];
+        totalReceived += list.length;
+        var newInPage = 0;
+        for (final e in list) {
+          try {
+            final m = (e as Map).cast<String, dynamic>();
+            final id = m['id']?.toString() ?? '';
+            if (id.isNotEmpty && !seenIds.add(id)) continue;
+            parsed.add({
+              'id': id,
+              'name': m['name'] as String? ?? '',
+              'startDate': m['startDate'] as String? ?? '',
+              'endDate': m['endDate'] as String? ?? '',
+              'matches': (m['matches'] as num?)?.toInt() ?? 0,
+            });
+            newInPage++;
+          } catch (_) {}
+        }
+        if (list.length < _pageSize || newInPage == 0) break;
+      } catch (_) {
+        break;
+      }
+    }
+    _log('fetchSeries',
+        received: totalReceived, dropped: 0, kept: parsed.length);
+    return parsed.isEmpty ? null : parsed;
+  }
+
+  /// Map a display name to CricAPI's NUMERIC player id.
+  ///
+  /// The `search` query param is NOT confirmed in public CricAPI v1
+  /// docs — it is sent best-effort, and the response is SCANNED: an
+  /// id is returned ONLY when a returned entry's name actually
+  /// matches [name] (exact, then contains). A non-matching page (e.g.
+  /// the server ignoring `search` and returning page 1 of all
+  /// players) yields null, never a wrong player. Costs 1 hit.
+  @override
+  Future<String?> resolvePlayerId(String name) async {
+    if (!isConfigured || _capped) return null;
+    final query = name.trim();
+    if (query.isEmpty) return null;
     final uri = Uri.parse(
-        '${AppConstants.cricApiBaseUrl}/series?apikey=${AppConstants.cricApiKey}&offset=0');
+        '${AppConstants.cricApiBaseUrl}/players?apikey=${AppConstants.cricApiKey}&offset=0&search=${Uri.encodeQueryComponent(query)}');
     final res = await _get(uri);
     if (res == null || res.statusCode != 200) return null;
     try {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
+      _updateQuota(body);
       if (body['status'] == 'failure') return null;
       final list = (body['data'] as List?) ?? [];
-      final parsed = <Map<String, dynamic>>[];
+      String norm(String s) =>
+          s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+      final want = norm(query);
+      String? containsMatch;
       for (final e in list) {
         try {
           final m = (e as Map).cast<String, dynamic>();
-          parsed.add({
-            'id': m['id']?.toString() ?? '',
-            'name': m['name'] as String? ?? '',
-            'startDate': m['startDate'] as String? ?? '',
-            'endDate': m['endDate'] as String? ?? '',
-            'matches': (m['matches'] as num?)?.toInt() ?? 0,
-          });
+          final id = m['id']?.toString() ?? '';
+          final pname = '${m['name'] ?? ''}';
+          if (id.isEmpty || pname.isEmpty) continue;
+          final have = norm(pname);
+          if (have == want) return id;
+          if (containsMatch == null &&
+              (have.contains(want) || want.contains(have))) {
+            containsMatch = id;
+          }
         } catch (_) {}
       }
-      return parsed.isEmpty ? null : parsed;
+      return containsMatch;
     } catch (_) {
       return null;
     }
   }
 
+  /// Player profile by the provider's NUMERIC id (see
+  /// [resolvePlayerId] for name -> id). The old implementation took a
+  /// display name, passed it to `players_info?id=` (which needs a
+  /// numeric id), and then hard-gated on `_mock.playerById` — so
+  /// every player outside 6 mock ids returned null even when the API
+  /// answered. Both defects are gone: numeric ids only, no mock gate.
+  ///
+  /// The response's `stats` block (when present) is parsed
+  /// tolerantly into per-format batting/bowling stats — its exact
+  /// shape varies, so unknown shapes yield identity-only data
+  /// (dataComplete=false) rather than a crash or invented numbers.
   @override
   Future<Player?> fetchPlayer(String playerId) async {
     if (!isConfigured || _capped) return null;
+    final raw = playerId.trim();
+    if (raw.isEmpty) return null;
+    String numericId;
+    if (RegExp(r'^\d+$').hasMatch(raw)) {
+      numericId = raw;
+    } else {
+      // Defensive: a caller that still passes a name gets resolved
+      // instead of being sent verbatim to `id=` (which could never
+      // match). The orchestrator resolves first, so this is a
+      // fallback, not the main path.
+      final resolved = await resolvePlayerId(raw);
+      if (resolved == null) return null;
+      numericId = resolved;
+    }
     final uri = Uri.parse(
-        '${AppConstants.cricApiBaseUrl}/players_info?apikey=${AppConstants.cricApiKey}&id=$playerId');
+        '${AppConstants.cricApiBaseUrl}/players_info?apikey=${AppConstants.cricApiKey}&id=$numericId');
     final res = await _get(uri);
     if (res == null || res.statusCode != 200) return null;
     try {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
+      _updateQuota(body);
       if (body['status'] == 'failure') return null;
       final data = (body['data'] as Map?)?.cast<String, dynamic>() ?? {};
-      final base = _mock.playerById(playerId);
-      if (base == null) return null;
-      return Player(
-        id: data['id']?.toString() ?? base.id,
-        name: data['name'] as String? ?? base.name,
-        team: base.team,
-        role: data['role'] as String? ?? base.role,
-        battingStyle: data['battingStyle'] as String? ?? base.battingStyle,
-        bowlingStyle: data['bowlingStyle'] as String? ?? base.bowlingStyle,
-        country: data['placeOfBirth'] as String? ?? base.country,
-        battingByFormat: base.battingByFormat,
-        bowlingByFormat: base.bowlingByFormat,
-        battingVsOpponent: base.battingVsOpponent,
-        bowlingVsOpponent: base.bowlingVsOpponent,
-        battingByLeague: base.battingByLeague,
-        battingByVenue: base.battingByVenue,
-        recentForm: base.recentForm,
-        matchups: base.matchups,
-        dismissalHistory: base.dismissalHistory,
-        dataComplete: false,
-        // Honest source: provider gave identity only; the deep
-        // stats riding along are the curated demo set (dataComplete
-        // false), NOT CricAPI-verified career numbers.
-        source: 'cricapi',
-        lastUpdated: DateTime.now(),
-      );
+      if (data.isEmpty) return null;
+      return _playerFromInfo(data, numericId);
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Build a [Player] from a `players_info` data block. Identity
+  /// fields are read directly; `stats` is parsed by [_parseStats]
+  /// and may contribute per-format tables. Never throws, never
+  /// invents stats: no parseable stats => identity-only profile
+  /// with dataComplete=false.
+  static Player _playerFromInfo(
+      Map<String, dynamic> data, String fallbackId) {
+    final name = data['name'] as String? ?? '';
+    final country = data['country'] as String? ?? '';
+    final stats = _parseStats(data['stats']);
+    final hasStats =
+        stats.batting.isNotEmpty || stats.bowling.isNotEmpty;
+    return Player(
+      id: data['id']?.toString() ?? fallbackId,
+      name: name,
+      team: country,
+      role: data['role'] as String? ?? 'Batter',
+      battingStyle: data['battingStyle'] as String? ?? '',
+      bowlingStyle: data['bowlingStyle'] as String? ?? '',
+      country: country,
+      battingByFormat: stats.batting,
+      bowlingByFormat: stats.bowling,
+      dataComplete: hasStats,
+      // Honest source: identity + any stats came from CricAPI.
+      // dataComplete is true ONLY when real per-format stats parsed.
+      source: 'cricapi',
+      lastUpdated: DateTime.now(),
+    );
+  }
+
+  /// Parse the `stats` block of a `players_info` response into
+  /// per-format batting / bowling tables.
+  ///
+  /// The block's shape is not pinned by public docs, so this handles
+  /// the shapes seen in the wild:
+  /// - a list of `{fn: 'batting', matchtype: 'test', stat: 'runs',
+  ///   value: '123'}` rows;
+  /// - a map `{test: {batting: {runs: ...}, bowling: {...}}}`;
+  /// - a list of per-format maps `{matchtype: 'odi', batting: {...}}`.
+  /// Unknown keys / shapes are ignored. Exposed as a static so unit
+  /// tests can pin the mapping without a network call.
+  static ({Map<String, BattingStats> batting, Map<String, BowlingStats> bowling})
+      parseStats(Object? stats) => _parseStats(stats);
+
+  static ({Map<String, BattingStats> batting, Map<String, BowlingStats> bowling})
+      _parseStats(Object? stats) {
+    // (format, fn) -> stat-name -> numeric value (best kept as string).
+    final acc = <String, Map<String, double>>{};
+    final best = <String, String>{};
+    void put(String format, String fn, String stat, Object? value) {
+      final key = '$format|$fn';
+      final normStat = _normStatName(stat);
+      if (normStat == null) return;
+      if (normStat == 'best') {
+        best[key] = '$value';
+        return;
+      }
+      final num? v = value is num
+          ? value
+          : double.tryParse('$value'.replaceAll(RegExp(r'[^0-9.\-]'), ''));
+      if (v == null) return;
+      acc.putIfAbsent(key, () => {})[normStat] = v.toDouble();
+    }
+
+    void walk(Object? node, String format, String fn) {
+      if (node is List) {
+        for (final e in node) {
+          walk(e, format, fn);
+        }
+        return;
+      }
+      if (node is! Map) return;
+      final m = node.cast<String, dynamic>();
+      // Row shape: {fn, matchtype, stat, value}.
+      if (m.containsKey('stat') && m.containsKey('value')) {
+        final f = _normFormat('${m['matchtype'] ?? m['format'] ?? format}');
+        final func = _normFn('${m['fn'] ?? m['type'] ?? fn}');
+        if (f != null && func != null) {
+          put(f, func, '${m['stat']}', m['value']);
+        }
+        return;
+      }
+      // Per-format / per-function nesting: keys name a format or fn.
+      for (final e in m.entries) {
+        final key = e.key;
+        final asFormat = _normFormat(key);
+        final asFn = _normFn(key);
+        if (asFormat != null) {
+          walk(e.value, asFormat, fn);
+        } else if (asFn != null) {
+          walk(e.value, format, asFn);
+        } else if (e.value is Map || e.value is List) {
+          walk(e.value, format, fn);
+        } else {
+          // Leaf stat under the current (format, fn) context.
+          if (format.isNotEmpty && fn.isNotEmpty) {
+            put(format, fn, key, e.value);
+          }
+        }
+      }
+    }
+
+    walk(stats, '', '');
+    final batting = <String, BattingStats>{};
+    final bowling = <String, BowlingStats>{};
+    for (final e in acc.entries) {
+      final parts = e.key.split('|');
+      if (parts.length != 2) continue;
+      final format = parts[0];
+      final fn = parts[1];
+      final s = e.value;
+      if (fn == 'batting') {
+        final runs = s['runs'] ?? 0;
+        final balls = s['balls'] ?? 0;
+        batting[format] = BattingStats(
+          matches: (s['matches'] ?? 0).toInt(),
+          innings: (s['innings'] ?? 0).toInt(),
+          runs: runs.toInt(),
+          balls: balls.toInt(),
+          fifties: (s['fifties'] ?? 0).toInt(),
+          hundreds: (s['hundreds'] ?? 0).toInt(),
+          fours: (s['fours'] ?? 0).toInt(),
+          sixes: (s['sixes'] ?? 0).toInt(),
+          average: s['average'] ?? 0,
+          strikeRate: s['strikeRate'] ??
+              (balls > 0 ? runs * 100 / balls : 0),
+          highest: (s['highest'] ?? 0).toInt(),
+        );
+      } else if (fn == 'bowling') {
+        final runs = s['runsConceded'] ?? s['runs'] ?? 0;
+        final wkts = s['wickets'] ?? 0;
+        final balls = s['balls'] ?? 0;
+        bowling[format] = BowlingStats(
+          matches: (s['matches'] ?? 0).toInt(),
+          innings: (s['innings'] ?? 0).toInt(),
+          wickets: wkts.toInt(),
+          balls: balls.toInt(),
+          runsConceded: runs.toInt(),
+          economy: s['economy'] ??
+              (balls > 0 ? runs * 6 / balls : 0),
+          average: s['average'] ?? (wkts > 0 ? runs / wkts : 0),
+          strikeRate: s['strikeRate'] ?? (wkts > 0 ? balls / wkts : 0),
+          fiveWickets: (s['fiveWickets'] ?? 0).toInt(),
+          best: best[e.key] ?? '-',
+        );
+      }
+    }
+    return (batting: batting, bowling: bowling);
+  }
+
+  static String? _normStatName(String raw) {
+    switch (raw.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '')) {
+      case 'm':
+      case 'mat':
+      case 'matches':
+        return 'matches';
+      case 'inn':
+      case 'innings':
+        return 'innings';
+      case 'r':
+      case 'runs':
+        return 'runs';
+      case 'b':
+      case 'balls':
+      case 'bf':
+      case 'ballsfaced':
+        return 'balls';
+      case '100s':
+      case '100':
+      case 'hundreds':
+        return 'hundreds';
+      case '50s':
+      case '50':
+      case 'fifties':
+        return 'fifties';
+      case '4s':
+      case 'fours':
+        return 'fours';
+      case '6s':
+      case 'sixes':
+        return 'sixes';
+      case 'ave':
+      case 'avg':
+      case 'average':
+      case 'battingaverage':
+        return 'average';
+      case 'sr':
+      case 'strikerate':
+        return 'strikeRate';
+      case 'hs':
+      case 'highest':
+      case 'highestscore':
+        return 'highest';
+      case 'wkts':
+      case 'w':
+      case 'wickets':
+        return 'wickets';
+      case 'econ':
+      case 'economy':
+      case 'economyrate':
+        return 'economy';
+      case 'best':
+      case 'bestbowling':
+      case 'bbi':
+      case 'bestinningbowling':
+        return 'best';
+      case '5w':
+      case '5wkt':
+      case 'fivewickets':
+      case 'fivewicketsininn':
+        return 'fiveWickets';
+      case 'runsconceded':
+        return 'runsConceded';
+      default:
+        return null;
+    }
+  }
+
+  static String? _normFormat(String raw) {
+    switch (raw.toLowerCase().trim()) {
+      case 'test':
+      case 'tests':
+      case 'mdm':
+        return 'Test';
+      case 'odi':
+      case 'odis':
+      case 'odm':
+        return 'ODI';
+      case 't20':
+      case 't20i':
+      case 't20is':
+      case 'it20':
+        return 'T20';
+      case 't10':
+        return 'T10';
+      default:
+        return null;
+    }
+  }
+
+  static String? _normFn(String raw) {
+    switch (raw.toLowerCase().trim()) {
+      case 'batting':
+      case 'bat':
+        return 'batting';
+      case 'bowling':
+      case 'bowl':
+        return 'bowling';
+      default:
+        return null;
     }
   }
 
@@ -276,6 +697,7 @@ class CricApiProvider implements CricketProvider {
       result: j['status'] as String? ?? '',
       toss: _tossText(j),
       lastUpdated: DateTime.now(),
+      source: 'CricAPI',
     );
   }
 
@@ -317,6 +739,7 @@ class CricApiProvider implements CricketProvider {
       toss: base.toss,
       innings: innings,
       lastUpdated: DateTime.now(),
+      source: base.source,
     );
   }
 
