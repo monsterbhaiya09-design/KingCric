@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../../models/match.dart';
 import '../../models/player.dart';
@@ -149,6 +150,7 @@ class EntitySportProvider implements CricketProvider {
       ],
       result: ProviderParsing.toStr(m['result'] ?? statusRaw),
       lastUpdated: DateTime.now(),
+      source: 'EntitySport',
     );
   }
 
@@ -166,6 +168,7 @@ class EntitySportProvider implements CricketProvider {
     if (body == null) return null;
     final parsed =
         _items(body).map(_matchFromGeneric).whereType<CricketMatch>().toList();
+    debugPrint('KingCric [EntitySport] fetchMatches: kept=${parsed.length}');
     return parsed.isEmpty ? null : parsed;
   }
 
@@ -202,6 +205,17 @@ class EntitySportProvider implements CricketProvider {
     }
     return parsed.isEmpty ? null : parsed;
   }
+
+  @override
+  /// FIX-7: no name->id lookup, no server quota reporting.
+  @override
+  Future<String?> resolvePlayerId(String name) async => null;
+
+  @override
+  int? get serverHitsLeft => null;
+
+  @override
+  bool get quotaExhausted => false;
 
   @override
   Future<Player?> fetchPlayer(String playerId) async {
