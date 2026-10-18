@@ -4,6 +4,15 @@
 > This document is the listing + release checklist for the future Play Store
 > submission. Do NOT submit until every item in §9 is checked.
 >
+> **Current state (Squad H audit, 2026-10-18):** version `1.0.0+2`
+> (versionCode **2**). All APKs so far are **debug-signed for sideloading
+> only** — Play rejects debug signatures. **No AAB has been built yet.**
+> **No release keystore exists.** Privacy-policy text exists
+> (`PRIVACY-POLICY.md`) but the **policy URL is still TODO** (not hosted).
+> **Support email is still TODO.** The **$25 Google developer fee has not
+> been paid** (unavoidable, charged by Google). The go/no-go gate is
+> `RELEASE-CHECKLIST.md` — a single NO-GO blocks submission.
+>
 > Source of truth for app identity:
 > - Package: `com.kingcric.app`
 > - Current version: `1.0.0+2` (versionCode **2**, versionName `1.0.0`)
@@ -107,10 +116,11 @@ claims — they would be false for the current build):
 - ❌ "Ball-by-ball every second / faster than TV" — free-tier live data is
   **10-minute cached**, not sub-second. The honest claim is "fast, honest
   live scores" + "Last updated" in-app.
-- ❌ "Full career stats for every player" — bundled Cricsheet sample is
-  **4 matches**; numbers are real-over-the-sample, labelled with dataset
-  size, not full careers. Full-career numbers need the full-dataset
-  refresh (see `CRICSHEET-DATA.md` §7).
+- ❌ "Full career stats for every player" — bundled Cricsheet subset is
+  **420 real matches (2024–2026)**; numbers are real-over-the-subset,
+  labelled with dataset size, not full careers. Pre-2024 careers are not
+  in the app. Full-career numbers need the full-dataset refresh (see
+  `CRICSHEET-DATA.md` §7).
 - ❌ "Push notifications" / "background updates when closed" — FCM +
   WorkManager are **planned, not in this build**. Favourites stores
   local reminder preferences only.
@@ -183,53 +193,41 @@ video risks showing stale UI. Add one only after the listing is stable.
 
 ---
 
-## 5. Privacy policy (outline — must be a live URL before submission)
+## 5. Privacy policy (full text in `PRIVACY-POLICY.md` — must be a live URL before submission)
 
-Play requires a **public privacy-policy URL** on the listing. This
-outline is the content; hosting is still TODO (see §9).
+Play requires a **public privacy-policy URL** on the listing. The full,
+paste-ready policy text lives in **`PRIVACY-POLICY.md`** (same repo).
+Summary of what it says — the policy itself is the source of truth:
 
-**Privacy Policy — KingCric (draft outline)**
+- **Collects nothing personal.** No account, no sign-in, no name, email,
+  phone, contacts, location, or files. Favourites (teams/players),
+  language + notification preferences, and cached match data live
+  **only on the device** (SharedPreferences). Uninstalling removes them.
+- **Permissions:** `INTERNET` (fetch live scores / scorecards) and
+  `ACCESS_NETWORK_STATE` (check connectivity). No other permissions.
+- **Data sources:** live scores / scorecards from documented free
+  cricket provider APIs (CricAPI / CricketData.org and backstops);
+  deep player stats calculated from **Cricsheet open ball-by-ball
+  data**. KingCric does **not** scrape Cricbuzz, Cricinfo, Crex, or
+  Cricmetrics. Provider API calls carry no personal data — only
+  match/player IDs (a provider's server necessarily sees the connecting
+  IP, as with any internet request).
+- **No analytics SDK, no crash-reporting SDK, no FCM, no AdMob SDK** in
+  the current build. The ad placeholder renders nothing. The day AdMob
+  ships, the policy, the "Contains ads" declaration, and the data-safety
+  form must all be updated **before** that version is released.
+- **Children:** general-audience sports-scores app; no personal data
+  from anyone, including children.
+- **Data deletion:** nothing server-side to delete — no account, no
+  server-side personal data. Uninstall removes on-device data. (Do NOT
+  claim "data can't be deleted" — the CricketLineX listing does, and it
+  is a trust liability.)
 
-1. **Who we are:** KingCric (`com.kingcric.app`). Contact: `[TODO: support
-   email]` (must be a real monitored inbox before submission).
-2. **What we collect:** **Nothing personal.** KingCric requires no
-   account, no sign-in, no name, email, phone, contacts, location, or
-   files. Favourites (teams/players) and language + notification
-   preferences are stored **only on the device** (SharedPreferences).
-3. **Permissions:** `INTERNET` (fetch live scores / scorecards) and
-   `ACCESS_NETWORK_STATE` (check connectivity). No other permissions
-   are requested.
-4. **Data sources:** Live scores / scorecards from documented free
-   cricket provider APIs (CricAPI / CricketData.org and backstops);
-   deep player stats calculated from **Cricsheet open ball-by-ball
-   data**. KingCric does **not** scrape Cricbuzz, Cricinfo, Crex, or
-   Cricmetrics. API keys are never shipped in the app binary as
-   readable secrets beyond the build-time `--dart-define` mechanism;
-   keys are stored as GitHub repo secrets for CI builds.
-5. **Third-party services:**
-   - Cricket data providers listed in §4 above (their own privacy
-     policies apply to their API calls; KingCric sends them no
-     personal data — only match/player IDs).
-   - **AdMob (only when enabled):** if/when a real AdMob unit ID is
-     added, Google AdMob may collect device / advertising identifiers
-     per Google's policies. Current build has **no AdMob SDK and no
-     ads** — the placeholder renders nothing. Update this policy the
-     day AdMob ships.
-   - **No analytics SDK, no crash-reporting SDK, no FCM** in the
-     current build. Add a section here if/when any is added.
-6. **Children:** KingCric is a general-audience sports-scores app. It
-   collects no personal data from anyone, including children.
-7. **Data deletion:** Nothing to delete — no account, no server-side
-   personal data. Uninstalling the app removes on-device favourites /
-   preferences. (Do NOT claim "data can't be deleted" — the CricketLineX
-   listing does, and it is a trust liability.)
-8. **Changes:** This policy may change; the current version will always
-   be at the listing URL. Last updated: `[TODO: date]`.
-
-**Hosting TODO:** publish this policy at a stable public URL (e.g.
-GitHub Pages on the KingCric repo, or the developer's own site) and
-paste that URL into Play Console → Policy → Privacy policy. The listing
-**cannot** be submitted without it.
+**Hosting TODO:** publish `PRIVACY-POLICY.md` at a stable public URL
+(e.g. GitHub Pages on the KingCric repo, or the developer's own site),
+fill in `[TODO: support email]`, `[TODO: policy URL]`, and `[TODO: last
+updated date]`, and paste that URL into Play Console → Policy →
+Privacy policy. The listing **cannot** be submitted without it.
 
 ---
 
@@ -290,26 +288,63 @@ opted into").
 
 ### 9a. Build — release signing + AAB (BLOCKING)
 
-- [ ] **Release keystore exists** (NOT the debug keystore). Current APKs
-      are **debug-signed for sideloading only** — Play rejects debug
-      signatures. Generate once with `keytool -genkeypair`, store the
-      keystore + passwords in the Secure Vault (never in git, never in
-      chat). Record the SHA-1 / SHA-256 fingerprints.
-- [ ] `android/key.properties` (keystore path, alias, passwords) present
-      locally / in CI secrets — **never committed**.
-- [ ] `android/app/build.gradle.kts` `signingConfig` points at the
-      release keystore for `release` builds.
-- [ ] Build **AAB, not APK**, for Play:
+Current state (2026-10-18): `android/app/build.gradle.kts` release block
+still uses `signingConfigs.getByName("debug")`, and no
+`android/key.properties` exists (correctly gitignored). Every APK so
+far is debug-signed. **None of the steps below have been run yet —
+the keystore has NOT been created. Do NOT run the keytool command
+inside an agent session without the user confirming the passwords and
+where they will be stored.**
+
+- [ ] **Step 1 — Create the release keystore (once, ever).**
+      Run this **once**, on a machine the user controls, and record the
+      passwords in the Secure Vault immediately (never in git, never in
+      chat). Losing the keystore = KingCric can never be updated on
+      Play under the same package — a new keystore means a new package.
+      ```sh
+      keytool -genkeypair -v \
+        -keystore ~/kingcric-release.keystore \
+        -alias kingcric \
+        -keyalg RSA -keysize 2048 -validity 10000
+      ```
+      Then record the SHA-1 / SHA-256 fingerprints:
+      ```sh
+      keytool -list -v -keystore ~/kingcric-release.keystore -alias kingcric
+      ```
+      Keep the keystore file backed up in **two** places (e.g. Secure
+      Vault + an offline copy). Never commit it.
+- [ ] **Step 2 — `android/key.properties` (never committed).**
+      `android/.gitignore` already ignores `key.properties` — verify it
+      stays ignored. Contents (passwords from the Secure Vault, never
+      typed into chat):
+      ```properties
+      storePassword=<keystore password from Secure Vault>
+      keyPassword=<key password from Secure Vault>
+      keyAlias=kingcric
+      storeFile=<absolute path to kingcric-release.keystore>
+      ```
+- [ ] **Step 3 — `android/app/build.gradle.kts` release signing.**
+      Replace the debug signing in the `release` block with a release
+      `signingConfig` that reads `key.properties` (standard Flutter
+      pattern: load `key.properties` at the top of the file, fail with
+      a clear error if it is missing on a release build). Do NOT hard-code
+      passwords in the Gradle file.
+- [ ] **Step 4 — Build AAB, not APK, for Play:**
       `flutter build appbundle --release [--dart-define=...]`
       (Play requires AAB; the sideload APK is a separate artifact.)
-- [ ] `versionCode` bumped for **every** Play submission (current: 2).
-      Play rejects a re-upload with the same versionCode. Bump
-      `version` in `pubspec.yaml` (`1.0.0+2` → `1.0.0+3` or `1.0.1+3`)
-      and verify `aapt2 dump badging` shows the new code.
-- [ ] Verify the AAB locally: `bundletool build-apks` + install on a
-      real device, or at minimum `aapt2 dump badging` on the extracted
-      APK + `apksigner verify` + `zipalign -c -P 16`.
-- [ ] Confirm the installed icon is Crown + Bat-Ball on the device.
+      Use the same `--dart-define` provider keys as the APK workflow
+      (see §12).
+- [ ] **Step 5 — `versionCode` bumped for every Play submission**
+      (current: 2). Play rejects a re-upload with the same versionCode.
+      Bump `version` in `pubspec.yaml` (`1.0.0+2` → `1.0.0+3` or
+      `1.0.1+3`) and verify `aapt2 dump badging` shows the new code.
+- [ ] **Step 6 — Verify the AAB before uploading:** `bundletool
+      build-apks` + install the extracted APK on the real phone, plus
+      `aapt2 dump badging` on the extracted APK + `apksigner verify` +
+      `zipalign -c -P 16`. Record the AAB sha256 in
+      `RELEASE-CHECKLIST.md` → Release record.
+- [ ] **Step 7 — Confirm the installed icon is Crown + Bat-Ball** on the
+      device, and the app launches to Home with no startup crash loop.
 
 ### 9b. Developer account + money (BLOCKING, outside the code)
 
@@ -326,9 +361,10 @@ opted into").
 - [ ] Install the **release-signed AAB-derived APK** on **Realme GT 6T**
       (Snapdragon 7+ Gen 3, arm64, Android 14) via Files → Downloads
       (not WhatsApp viewer), after uninstall + restart.
-- [ ] Open every screen: Home (Live / Upcoming / Recent), Match Detail
-      (Live / Scorecard / Squad / Prediction), Player Profile, Compare,
-      Stats, Leagues, Favourites. Confirm: no crash, no truncation
+- [ ] Open every screen: Home (Live / Upcoming / Finished), Match Detail
+      (Live / Scorecard / Squad / Venue & H2H / Prediction), Player
+      Profile, Compare, Stats, Leagues, Favourites. Confirm: no crash,
+      no truncation
       ("King...", "Upcomin g"), no comma-joined team names, no lowercase
       team names, no "No matches" when matches exist, no ad placeholder,
       no fake "Complete".
@@ -382,11 +418,91 @@ features that are not in the shipped build.
 ## 11. File map
 
 - This file: `PLAYSTORE-RELEASE.md` (listing + release checklist)
+- Release gate: `RELEASE-CHECKLIST.md` (20-point go / no-go)
+- Privacy policy: `PRIVACY-POLICY.md` (paste-ready; hosting TODO)
 - Data sources: `API-SETUP.md`, `MULTI-API.md`, `CRICSHEET-DATA.md`
 - Reference patterns: `REFERENCE-SPEC.md`, `REFERENCE-APPS-DEEP-DIVE.md`,
   `CRICKETLINEX-REFERENCE.md`, `REQUIREMENTS-MAPPING.md`
 - Premium / smoothness: `PREMIUM-SMOOTH.md`, `PLAYER-DATA-EXTRACTION.md`
 - Build: `.github/workflows/build-apk.yml` (currently builds APK;
   a Play release needs an **AAB** job — add `flutter build appbundle`
-  + release signing before submission; see §9a)
+  + release signing before submission; see §9a and §12)
 - Install testing: `INSTALL-GT6T.md`
+
+---
+
+## 12. Workflow audit — what must change to build AAB + release signing
+
+> **Read-only audit (Squad H, 2026-10-18).** The workflow file was NOT
+> edited — the changes below are proposed here, to be implemented as a
+> separate workflow change when the release keystore exists. Do not
+> implement them before §9a Steps 1–3 are done: an AAB job without the
+> keystore would produce a debug-signed bundle Play rejects.
+
+### What the current workflow does (audited)
+
+`.github/workflows/build-apk.yml` ("Build KingCric APK", trigger: push
+to `main` on `**.dart` / `pubspec.yaml` / `pubspec.lock` /
+`android/**` / the workflow file itself, plus `workflow_dispatch`):
+
+- Checkout → Java 17 → manual sdkmanager install of SDK 36 +
+  build-tools 36.0.0 + NDK 28.2.13676358 → Flutter 3.47.7 → `flutter
+  pub get` → `flutter analyze` (must be clean) → `flutter test` →
+  `flutter build apk --release` with `--dart-define` provider keys
+  from repo secrets (`CRIC_API_KEY`, `ELITESPORT_API_KEY`,
+  `ENTITYSPORT_API_KEY`, `SPORTSDB_API_KEY`; missing secret = empty
+  define, provider skipped, build must not fail) → Verify APK (aapt2
+  badging minSdk 24 / targetSdk 36, apksigner verify, zipalign, native
+  libs for all ABIs) → upload verify report + APK artifact
+  (`kingcric-app-release-apk`, retention 30 days). Concurrency:
+  `kingcric-apk` group, cancel-in-progress.
+- The build step correctly captures flutter's own exit code (no
+  `| tee` exit-code masking), and the Upload step uses
+  `if-no-files-found: error` so a missing APK fails loudly.
+
+### What must change for a Play release (proposed, not yet implemented)
+
+1. **New job (or new workflow) `build-aab`** — do NOT replace the APK
+   job: the sideload APK is still needed for user testing. The AAB job
+   should reuse the same Checkout → Java → SDK → Flutter → pub get →
+   analyze → test steps, then run `flutter build appbundle --release`
+   with the **same** `--dart-define` provider keys. Trigger it on the
+   same paths plus a manual `workflow_dispatch` (release builds should
+   also be runnable on demand, e.g. on a release tag).
+2. **Release signing in CI.** The AAB job needs the release keystore
+   and `key.properties` values as GitHub **secrets** (never committed):
+   e.g. `RELEASE_KEYSTORE_BASE64` (base64 of the keystore file),
+   `KEYSTORE_PASSWORD`, `KEY_PASSWORD`, `KEY_ALIAS`. The job must
+   decode the keystore to a temp file, write `android/key.properties`
+   from secrets, build, then delete both. It must **never echo** a
+   secret or print `key.properties`. Until these secrets exist, the AAB
+   job must fail fast with a clear "release keystore secrets not set"
+   message — never silently produce a debug-signed bundle.
+3. **AAB verification step** (mirror of the APK verify step): confirm
+   `build/app/outputs/bundle/release/app-release.aab` exists, then
+   verify with `bundletool build-apks --bundle=… --output=/tmp/…apks`
+   (or at minimum `bundletool validate` / `aapt2 dump badging` on the
+   extracted APK), plus `apksigner verify` on the extracted APK, and
+   print AAB size + sha256. Upload the AAB as artifact
+   `kingcric-app-release-aab` (retention 90 days, not 30 — release
+   artifacts are the audit trail).
+4. **versionCode guard.** Add a step that reads `pubspec.yaml` version
+   and fails if versionCode ≤ the last submitted versionCode (tracked
+   in `RELEASE-CHECKLIST.md` → Release record). This is the cheapest
+   protection against Play's same-versionCode rejection.
+5. **Keep the APK job's guarantees.** Any new job must keep: flutter's
+   own exit code (no pipe masking), `if-no-files-found: error` on the
+   artifact upload, and the verify-report upload on `always()`.
+6. **Do NOT change:** the `permissions: contents: read` scope, the
+   concurrency cancel-in-progress behaviour, or the provider-key
+   secret handling (missing secret = empty define, build must not
+   fail) — all three are correct as-is.
+
+### Blockers before any of the above is useful
+
+- Release keystore does **not** exist (§9a Step 1).
+- `key.properties` does **not** exist (§9a Step 2).
+- `android/app/build.gradle.kts` release block still uses debug signing
+  (§9a Step 3).
+- Privacy-policy URL, support email, and the $25 developer fee are
+  still TODO (see header + `RELEASE-CHECKLIST.md`).
