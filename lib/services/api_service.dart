@@ -60,6 +60,27 @@ class _CacheEntry<T> {
   bool get fresh => DateTime.now().isBefore(expiresAt);
 }
 
+/// Server-side quota state for the keyed providers (CricAPI).
+/// - [keyMissing]: no keyed provider is configured — the app is in
+///   demo/backstop mode by construction, not by failure.
+/// - [quotaExhausted]: a provider's last response said the server
+///   quota is gone (hitsLeft == 0 / quota error). Stop calling it.
+/// - [ok]: at least one provider reported remaining quota.
+/// - [unknown]: key configured but no provider has reported quota
+///   yet (no successful call so far). UI shows no banner.
+enum QuotaState { ok, keyMissing, quotaExhausted, unknown }
+
+/// One merge bucket: an entry plus the provider that supplied it,
+/// so dedupe can tell "same match from two providers" (merge) apart
+/// from "two distinct matches from one provider" (keep both).
+class _MergeBucket {
+  CricketMatch entry;
+  final String provider;
+  final String baseKey;
+  final String leagueKey;
+  _MergeBucket(this.entry, this.provider, this.baseKey, this.leagueKey);
+}
+
 class ApiService {
   final MockDataService _mock = MockDataService();
   final List<CricketProvider> _providers;
@@ -150,6 +171,27 @@ class ApiService {
 
   /// True when the primary (CricAPI) key is present — full scorecards.
   bool get hasPrimaryKey => AppConstants.hasApiKey;
+
+  /// FIX-7: quota state from the providers' SERVER-side reports
+  /// (see [CricketProvider.serverHitsLeft]), never from the
+  /// in-memory hit counters alone. Screens show a DISTINCT banner
+  /// for [QuotaState.keyMissing] vs [QuotaState.quotaExhausted]
+  /// instead of silently degrading to demo data.
+  QuotaState get quotaState {
+    if (!isLive) return QuotaState.keyMissing;
+    var sawQuotaInfo = false;
+    for (final p in _providers) {
+      if (!p.isConfigured) continue;
+      if (p.quotaExhausted) return QuotaState.quotaExhausted;
+      if (p.serverHitsLeft != null) sawQuotaInfo = true;
+    }
+    return sawQuotaInfo ? QuotaState.ok : QuotaState.unknown;
+  }
+
+  /// Resolved provider player ids, keyed by display name
+  /// ("Virat Kohli" -> "253802"). Name resolution costs a hit, so it
+  /// is cached for the session. Never stores keys.
+  final Map<String, String> _playerIdCache = {};
 
   /// Lazily-loaded Cricsheet service (bundled sample, parsed once).
   /// Never throws: load failure -> empty service (no Cricsheet data).
@@ -267,65 +309,153 @@ class ApiService {
   /// when other providers knew more. Now every configured provider
   /// is asked and the results are merged.
   ///
-  /// Dedupe key: normalised (teamA, teamB, start-date). Provider ids
-  /// are NOT comparable across providers (CricAPI uuid vs SportScore
-  /// numeric vs TheSportsDB idEvent), so id-based dedupe would keep
-  /// duplicates. When two entries are the same fixture, the RICHER
-  /// one wins: innings > more scores > live status > first seen.
-  /// The merged entry keeps the richer entry's id/scores/innings so
-  /// the scorecard fetch (keyed by id) still works.
+  /// FIX-7 dedupe (the old key collapsed distinct matches): the key
+  /// is now (teams, day, format, league) + provider attribution.
+  /// - Same match from TWO providers (same key, different provider)
+  ///   merges; the RICHER entry wins (innings > more scores > live
+  ///   status > first seen). The merged entry keeps the richer
+  ///   entry's id/scores/innings so the scorecard fetch (keyed by
+  ///   id) still works.
+  /// - Two DISTINCT matches from ONE provider (same key but
+  ///   different non-empty provider ids — double-header, men +
+  ///   women, two formats, two series the same day) are KEPT as two
+  ///   cards. Provider ids are not comparable ACROSS providers
+  ///   (CricAPI uuid vs SportScore numeric vs TheSportsDB idEvent),
+  ///   so id-based dedupe is only applied within one provider.
+  /// - A provider that reports no league ('' / 'International' /
+  ///   'Cricket') merges into the same fixture reported WITH a
+  ///   league by a different provider — otherwise every cross-
+  ///   provider fixture would double up.
+  /// [providerNames], when given, must parallel [lists] (the
+  /// orchestrator passes them; Home's already-merged lists pass
+  /// none, which is correct — those entries are already deduped).
   static List<CricketMatch> mergeMatches(
-      List<List<CricketMatch>> lists) {
-    final byKey = <String, CricketMatch>{};
+      List<List<CricketMatch>> lists,
+      {List<String>? providerNames}) {
     int richness(CricketMatch m) =>
         m.innings.length * 100 +
         m.scores.length * 10 +
         (m.squadA.length + m.squadB.length) +
         (m.isEffectivelyLive ? 1 : 0);
-    for (final list in lists) {
-      for (final m in list) {
-        final key = _fixtureKey(m);
-        final existing = byKey[key];
+    // Pass 1: bucket by (baseKey, leagueKey). Same-provider entries
+    // with different non-empty ids get an id-suffixed bucket so
+    // they can never collapse each other.
+    final buckets = <String, _MergeBucket>{};
+    for (var li = 0; li < lists.length; li++) {
+      final provider = (providerNames != null && li < providerNames.length)
+          ? providerNames[li]
+          : '';
+      for (final m in lists[li]) {
+        final base = _baseKey(m);
+        final league = _leagueKey(m);
+        var key = '$base|$league';
+        final existing = buckets[key];
         if (existing == null) {
-          byKey[key] = m;
-        } else if (richness(m) > richness(existing)) {
-          byKey[key] = m;
+          buckets[key] = _MergeBucket(m, provider, base, league);
+        } else if (existing.provider == provider &&
+            provider.isNotEmpty &&
+            existing.entry.id.isNotEmpty &&
+            m.id.isNotEmpty &&
+            existing.entry.id != m.id) {
+          // Same provider, different match id => DISTINCT match.
+          key = '$key#${m.id}';
+          final split = buckets[key];
+          if (split == null) {
+            buckets[key] = _MergeBucket(m, provider, base, league);
+          } else if (richness(m) > richness(split.entry)) {
+            split.entry = m;
+          }
+        } else if (richness(m) > richness(existing.entry)) {
+          existing.entry = m;
         }
       }
     }
-    return byKey.values.toList();
+    // Pass 2: fold empty-league buckets (a provider that did not
+    // report a league) into the same fixture reported WITH a league
+    // by a DIFFERENT provider. Two buckets with different non-empty
+    // leagues stay separate (genuinely different matches).
+    final byBase = <String, List<_MergeBucket>>{};
+    for (final b in buckets.values) {
+      byBase.putIfAbsent(b.baseKey, () => []).add(b);
+    }
+    final out = <CricketMatch>[];
+    for (final group in byBase.values) {
+      if (group.length == 1) {
+        out.add(group.single.entry);
+        continue;
+      }
+      final nonEmpty =
+          group.where((b) => b.leagueKey.isNotEmpty).toList();
+      final empty = group.where((b) => b.leagueKey.isEmpty).toList();
+      final folded = <_MergeBucket>{};
+      for (final e in empty) {
+        _MergeBucket? target;
+        for (final n in nonEmpty) {
+          if (folded.contains(n)) continue;
+          if (n.provider != e.provider) {
+            target = n;
+            break;
+          }
+        }
+        if (target != null) {
+          if (richness(e.entry) > richness(target.entry)) {
+            target.entry = e.entry;
+          }
+          folded.add(e);
+        }
+      }
+      for (final b in group) {
+        if (!folded.contains(b)) out.add(b.entry);
+      }
+    }
+    return out;
   }
 
-  static String _fixtureKey(CricketMatch m) {
-    String norm(String s) => s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
-    final teams = [norm(m.teamA), norm(m.teamB)]..sort();
+  static String _norm(String s) =>
+      s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+
+  /// Teams + day + format. Two fixtures sharing this still need the
+  /// league / provider-id rules in [mergeMatches] to stay apart.
+  static String _baseKey(CricketMatch m) {
+    final teams = [_norm(m.teamA), _norm(m.teamB)]..sort();
     final day =
         '${m.startTime.year}-${m.startTime.month}-${m.startTime.day}';
-    return '${teams[0]}-vs-${teams[1]}@$day';
+    return '${teams[0]}-vs-${teams[1]}@$day#${_norm(m.format)}';
   }
+
+  /// League discriminator. Generic / missing leagues collapse to ''
+  /// so a provider that reports no league still merges with the
+  /// same fixture reported with a league by another provider.
+  static String _leagueKey(CricketMatch m) {
+    final l = _norm(m.league);
+    if (l.isEmpty || l == 'international' || l == 'cricket') return '';
+    return l;
+  }
+
+
 
   Future<List<CricketMatch>> _fetchMatchesUncached() async {
     final collected = <List<CricketMatch>>[];
-    String? contributing;
+    final contributing = <String>[];
     for (final p in _providers) {
       if (!p.isConfigured) continue;
       try {
         final result = await p.fetchMatches();
         if (result != null && result.isNotEmpty) {
           collected.add(result);
-          contributing = p.name;
+          contributing.add(p.name);
         }
       } catch (_) {
         continue; // next provider
       }
     }
     if (collected.isNotEmpty) {
-      final merged = mergeMatches(collected);
+      final merged = mergeMatches(collected, providerNames: contributing);
       // Opportunistic cross-check vs cached other-provider data.
       if (_matchesCache != null) {
         crossCheckMatches(merged, _matchesCache!.value);
       }
-      lastSource = contributing ?? 'merged';
+      lastSource = contributing.length == 1 ? contributing.single : 'merged';
       lastMatchesUpdated = DateTime.now();
       _matchesCache = _CacheEntry<List<CricketMatch>>(
         merged,
@@ -333,9 +463,20 @@ class ApiService {
         lastSource,
       );
       _notifyMatchesListeners(merged);
+      debugPrint(
+          'KingCric ApiService fetchMatches: providers=$contributing merged=${merged.length}');
       return merged;
     }
-    if (_matchesCache != null) return _matchesCache!.value;
+    if (_matchesCache != null) {
+      // FIX-7: warm-cache stale path. The old code returned the stale
+      // cache WITHOUT touching lastSource, so the quota/demo banner
+      // never showed and stale data looked live. Stale cache served
+      // after every provider failed IS a mock-grade fallback: say so.
+      lastSource = 'mock';
+      debugPrint(
+          'KingCric ApiService fetchMatches: all providers empty — serving stale cache, lastSource=mock');
+      return _matchesCache!.value;
+    }
     lastSource = 'mock';
     return _mock.matches();
   }
@@ -363,17 +504,23 @@ class ApiService {
       return _upcomingCache!.value;
     }
     final collected = <List<CricketMatch>>[];
+    final contributing = <String>[];
     for (final p in _providers) {
       if (!p.isConfigured) continue;
       try {
         final result = await p.fetchUpcoming();
-        if (result != null && result.isNotEmpty) collected.add(result);
+        if (result != null && result.isNotEmpty) {
+          collected.add(result);
+          contributing.add(p.name);
+        }
       } catch (_) {
         continue;
       }
     }
     if (collected.isNotEmpty) {
-      final merged = mergeMatches(collected);
+      final merged = mergeMatches(collected, providerNames: contributing);
+      debugPrint(
+          'KingCric ApiService fetchUpcoming: providers=$contributing merged=${merged.length}');
       _upcomingCache = _CacheEntry<List<CricketMatch>>(
         merged,
         DateTime.now().add(const Duration(minutes: 60)),
@@ -545,10 +692,25 @@ class ApiService {
         return real;
       }
     } catch (_) {}
+    // FIX-7: providers need their OWN player id (CricAPI: numeric).
+    // A display name ('Virat Kohli', 'scorecard-Aiden Markram') is
+    // resolved to that id first — sending a name verbatim to
+    // `players_info?id=` could never match. Resolution is cached.
     for (final p in _providers) {
       if (!p.isConfigured) continue;
       try {
-        final result = await p.fetchPlayer(playerId);
+        var pid = playerId;
+        if (!_isNumericId(pid)) {
+          final display = _displayName(pid);
+          pid = _playerIdCache[display] ?? '';
+          if (pid.isEmpty) {
+            final resolved = await p.resolvePlayerId(display);
+            if (resolved == null || resolved.isEmpty) continue;
+            pid = resolved;
+            _playerIdCache[display] = pid;
+          }
+        }
+        final result = await p.fetchPlayer(pid);
         if (result != null) {
           lastSource = p.name;
           lastPlayerUpdated = DateTime.now();
@@ -564,6 +726,18 @@ class ApiService {
       }
     }
     return _mock.playerById(playerId);
+  }
+
+  static bool _isNumericId(String s) => RegExp(r'^\d+$').hasMatch(s.trim());
+
+  /// 'scorecard-Aiden Markram' -> 'Aiden Markram'. Anything else
+  /// passes through unchanged.
+  static String _displayName(String idOrName) {
+    const prefix = 'scorecard-';
+    if (idOrName.startsWith(prefix)) {
+      return idOrName.substring(prefix.length);
+    }
+    return idOrName;
   }
 
   Future<List<Player>> fetchPlayers() async {
