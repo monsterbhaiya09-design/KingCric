@@ -188,6 +188,7 @@ class ApiService {
     _detailCache.clear();
     _playerCache.clear();
     _seriesCache = null;
+    _upcomingCache = null;
   }
 
   /// Cross-check helper: compare two match lists on (id -> runs).
@@ -258,34 +259,130 @@ class ApiService {
     }
   }
 
+  /// Merge several providers' match lists into ONE list.
+  ///
+  /// ROOT-CAUSE FIX (Live incomplete): the old code returned the FIRST
+  /// provider's non-empty list and never looked at the others, so if
+  /// CricAPI returned 1 live match the app showed 1 live match even
+  /// when other providers knew more. Now every configured provider
+  /// is asked and the results are merged.
+  ///
+  /// Dedupe key: normalised (teamA, teamB, start-date). Provider ids
+  /// are NOT comparable across providers (CricAPI uuid vs SportScore
+  /// numeric vs TheSportsDB idEvent), so id-based dedupe would keep
+  /// duplicates. When two entries are the same fixture, the RICHER
+  /// one wins: innings > more scores > live status > first seen.
+  /// The merged entry keeps the richer entry's id/scores/innings so
+  /// the scorecard fetch (keyed by id) still works.
+  static List<CricketMatch> mergeMatches(
+      List<List<CricketMatch>> lists) {
+    final byKey = <String, CricketMatch>{};
+    int richness(CricketMatch m) =>
+        m.innings.length * 100 +
+        m.scores.length * 10 +
+        (m.squadA.length + m.squadB.length) +
+        (m.isEffectivelyLive ? 1 : 0);
+    for (final list in lists) {
+      for (final m in list) {
+        final key = _fixtureKey(m);
+        final existing = byKey[key];
+        if (existing == null) {
+          byKey[key] = m;
+        } else if (richness(m) > richness(existing)) {
+          byKey[key] = m;
+        }
+      }
+    }
+    return byKey.values.toList();
+  }
+
+  static String _fixtureKey(CricketMatch m) {
+    String norm(String s) => s.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    final teams = [norm(m.teamA), norm(m.teamB)]..sort();
+    final day =
+        '${m.startTime.year}-${m.startTime.month}-${m.startTime.day}';
+    return '${teams[0]}-vs-${teams[1]}@$day';
+  }
+
   Future<List<CricketMatch>> _fetchMatchesUncached() async {
+    final collected = <List<CricketMatch>>[];
+    String? contributing;
     for (final p in _providers) {
       if (!p.isConfigured) continue;
       try {
         final result = await p.fetchMatches();
         if (result != null && result.isNotEmpty) {
-          // Opportunistic cross-check vs cached other-provider data.
-          if (_matchesCache != null &&
-              _matchesCache!.source != p.name) {
-            crossCheckMatches(result, _matchesCache!.value);
-          }
-          lastSource = p.name;
-          lastMatchesUpdated = DateTime.now();
-          _matchesCache = _CacheEntry<List<CricketMatch>>(
-            result,
-            DateTime.now().add(AppConstants.liveCacheTtl),
-            p.name,
-          );
-          _notifyMatchesListeners(result);
-          return result;
+          collected.add(result);
+          contributing = p.name;
         }
       } catch (_) {
         continue; // next provider
       }
     }
+    if (collected.isNotEmpty) {
+      final merged = mergeMatches(collected);
+      // Opportunistic cross-check vs cached other-provider data.
+      if (_matchesCache != null) {
+        crossCheckMatches(merged, _matchesCache!.value);
+      }
+      lastSource = contributing ?? 'merged';
+      lastMatchesUpdated = DateTime.now();
+      _matchesCache = _CacheEntry<List<CricketMatch>>(
+        merged,
+        DateTime.now().add(AppConstants.liveCacheTtl),
+        lastSource,
+      );
+      _notifyMatchesListeners(merged);
+      return merged;
+    }
     if (_matchesCache != null) return _matchesCache!.value;
     lastSource = 'mock';
     return _mock.matches();
+  }
+
+  /// True when the last fetch fell back to mock/demo data even
+  /// though a key is configured — i.e. quota exhausted / all
+  /// providers down. Screens use this for an honest banner instead
+  /// of silently showing demo as live.
+  bool get lastFetchWasMock => lastSource == 'mock';
+
+  _CacheEntry<List<CricketMatch>>? _upcomingCache;
+
+  /// Upcoming fixtures from every provider that has a fixtures
+  /// endpoint (CricAPI /matches, EliteSport /fixtures, TheSportsDB
+  /// searchevents), merged + deduped the same way as [fetchMatches].
+  /// Cached 60 min: upcoming fixtures barely change, and CricAPI's
+  /// 100-hits/day quota must not be spent re-fetching them every
+  /// 10-min live refresh. Returns [] (never mock) when no provider
+  /// has fixtures — the Home list already carries any mock upcoming.
+  Future<List<CricketMatch>> fetchUpcoming(
+      {bool forceRefresh = false}) async {
+    if (!forceRefresh &&
+        _upcomingCache != null &&
+        _upcomingCache!.fresh) {
+      return _upcomingCache!.value;
+    }
+    final collected = <List<CricketMatch>>[];
+    for (final p in _providers) {
+      if (!p.isConfigured) continue;
+      try {
+        final result = await p.fetchUpcoming();
+        if (result != null && result.isNotEmpty) collected.add(result);
+      } catch (_) {
+        continue;
+      }
+    }
+    if (collected.isNotEmpty) {
+      final merged = mergeMatches(collected);
+      _upcomingCache = _CacheEntry<List<CricketMatch>>(
+        merged,
+        DateTime.now().add(const Duration(minutes: 60)),
+        'merged',
+      );
+      return merged;
+    }
+    if (_upcomingCache != null) return _upcomingCache!.value;
+    return const [];
   }
 
   /// Stale-while-revalidate: returns the cached list IMMEDIATELY
