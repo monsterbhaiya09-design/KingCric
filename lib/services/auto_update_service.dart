@@ -26,10 +26,54 @@ class AutoUpdateService {
   final Map<String, MatchStatus> _lastKnown = {};
   final List<void Function(CricketMatch finished)> _listeners = [];
 
+  /// Re-entrancy guard: a slow fetch must never let two ticks overlap
+  /// and fire the same finished-match event twice.
+  bool _ticking = false;
+
   AutoUpdateService({ApiService? api}) : _api = api ?? ApiService();
 
   void addFinishedListener(void Function(CricketMatch) fn) =>
       _listeners.add(fn);
+
+  /// Fired on EVERY successful poll with the fresh list (not just on
+  /// finish). Screens use it for incremental updates: only matches
+  /// whose score changed re-render. Never throws.
+  final List<void Function(List<CricketMatch> matches)> _matchesListeners =
+      [];
+  void addMatchesListener(void Function(List<CricketMatch>) fn) =>
+      _matchesListeners.add(fn);
+  void removeMatchesListener(void Function(List<CricketMatch>) fn) =>
+      _matchesListeners.remove(fn);
+
+  /// App returned from background (AppLifecycleState.resumed):
+  /// refresh ONLY when a live match exists. Upcoming/series/
+  /// completed data is already cached with long TTLs — re-fetching
+  /// it on every resume would burn quota for zero new information.
+  Future<void> resume() async {
+    try {
+      final matches = await _api.fetchMatches();
+      if (matches.any((m) => m.isEffectivelyLive)) {
+        await tick();
+      } else {
+        for (final fn in List.of(_matchesListeners)) {
+          try {
+            fn(matches);
+          } catch (_) {}
+        }
+      }
+    } catch (_) {
+      // Resume refresh is best-effort; cached data stays on screen.
+    }
+  }
+
+  /// Refresh live matches only (manual refresh). Completed matches
+  /// are served from the 60-min cache, never re-fetched — finished
+  /// data cannot change.
+  Future<void> refreshLiveOnly() async {
+    try {
+      await _api.fetchMatches(forceRefresh: true);
+    } catch (_) {}
+  }
 
   void start() {
     stop();
@@ -56,30 +100,47 @@ class AutoUpdateService {
   /// NEVER throws: all failures are swallowed so a flaky network /
   /// bad payload can never kill the app process.
   Future<void> tick() async {
+    // Skip overlapping ticks instead of stacking network calls.
+    if (_ticking) return;
+    _ticking = true;
     try {
       await _tickInner();
     } catch (_) {
       // Best-effort polling only; keep last verified data.
+    } finally {
+      _ticking = false;
     }
   }
 
   Future<void> _tickInner() async {
     final matches = await _api.fetchMatches();
+    lastPoll = DateTime.now();
+    for (final fn in List.of(_matchesListeners)) {
+      try {
+        fn(matches);
+      } catch (_) {}
+    }
     for (final m in matches) {
       final prev = _lastKnown[m.id];
       _lastKnown[m.id] = m.status;
       if (prev == null) continue; // first sighting: no transition yet
       if (prev != MatchStatus.completed &&
           m.status == MatchStatus.completed) {
-        // Match just finished: fetch full detail + validate.
-        final detail =
-            await _api.fetchMatchDetail(m.id) ?? m;
+        // Match just finished: fetch the FINAL scorecard fresh
+        // (forceRefresh: a cached live snapshot is stale by design).
+        final detail = await _api.fetchMatchDetail(m.id,
+                forceRefresh: true) ??
+            m;
         if (!CompletenessValidator.inningsReconciles(detail)) {
           // Keep last verified data; do not propagate a bad scorecard.
           continue;
         }
         for (final fn in _listeners) {
-          fn(detail);
+          try {
+            fn(detail);
+          } catch (_) {
+            // One bad listener must never break the others / the tick.
+          }
         }
       }
     }
