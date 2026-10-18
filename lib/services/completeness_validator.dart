@@ -29,12 +29,15 @@ class CompletenessValidator {
 
   /// Reconcile an innings: sum of batting entries must equal total.
   /// Small extras (wides/no-balls) make an exact match impossible, so
-  /// we allow a tolerance of 15 runs (extras) and require wickets match.
+  /// we allow a tolerance that scales with the total: a flat 15 runs
+  /// for short innings, plus ~5% for big totals (a Test innings can
+  /// legitimately carry >15 extras). Wickets must still match.
   static bool inningsReconciles(CricketMatch m) {
     for (final inn in m.innings) {
       final sum =
           inn.batting.fold<int>(0, (acc, e) => acc + e.runs);
-      if ((inn.total - sum).abs() > 15) return false;
+      final tolerance = 15 + (inn.total ~/ 20);
+      if ((inn.total - sum).abs() > tolerance) return false;
       final wkts =
           inn.batting.where((e) => !e.notOut).length;
       if (inn.wickets != 0 && wkts != inn.wickets && inn.wickets < 10) {
