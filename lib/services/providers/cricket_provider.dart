@@ -96,8 +96,24 @@ class ProviderParsing {
     return (runs, wickets);
   }
 
+  /// Text-only status: NO score information. Providers parsing a
+  /// score-bearing payload MUST call [resolveStatus] with the REAL
+  /// hasScores computed from the parsed scores — never this helper —
+  /// because a live match's status text ("1st Innings", "Match
+  /// scheduled") can look not-started while scores are on the board.
   static MatchStatus statusFromText(String raw) => resolveStatus(
         raw: raw, matchStarted: null, matchEnded: null, hasScores: false);
+
+  /// True when a parsed score line shows real play: runs, a wicket,
+  /// or balls bowled. A 0/0 placeholder row (side yet to bat) is NOT
+  /// scores. Every provider must compute hasScores with this helper
+  /// (or equivalent) from its OWN parsed scores — never hard-code it.
+  static bool scoresPresent({
+    required int runs,
+    required int wickets,
+    double overs = 0,
+  }) =>
+      runs > 0 || wickets > 0 || overs > 0;
 
   /// Resolve a match status from every signal a provider gives us.
   ///
@@ -131,7 +147,8 @@ class ProviderParsing {
         s.contains('match drawn') ||
         s.contains('drawn') ||
         s.contains('no result') ||
-        s.contains('abandoned')) {
+        s.contains('abandoned') ||
+        s.contains('tied')) {
       return MatchStatus.completed;
     }
     // MAIN-CORE FIX: runs on the board beat a stale "not started"
