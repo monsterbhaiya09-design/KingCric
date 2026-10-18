@@ -1,0 +1,175 @@
+import 'package:flutter/material.dart';
+import '../models/match.dart';
+import '../utils/app_theme.dart';
+import 'premium_widgets.dart';
+
+/// Shared match card — ONE component used by Home AND Leagues
+/// (reference rule: never two diverging cards).
+///
+/// Canonical layout (CricketLineX / Cricbuzz / Crex pattern):
+/// status pill + League • Format → fixture title (max 2 lines) →
+/// venue (1 line) → ONE row per team: name left, score right →
+/// ONE equation/result/starts line → single CTA.
+///
+/// Status pill ALWAYS derives from [CricketMatch.isEffectivelyLive]
+/// + [isCompleted] — the same truth the Home filter uses — so a live
+/// match can never again show an UPCOMING pill.
+/// Upcoming cards show NO score rows (a match that has not started
+/// has no score). Finished cards show both scores + result line.
+class KingMatchCard extends StatelessWidget {
+  final CricketMatch match;
+  final VoidCallback onTap;
+  const KingMatchCard({super.key, required this.match, required this.onTap});
+
+  static const _months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+
+  String _startsLine(DateTime start) {
+    final now = DateTime.now();
+    final local = start.toLocal();
+    final sameDay = now.year == local.year &&
+        now.month == local.month &&
+        now.day == local.day;
+    final hour12 = local.hour % 12 == 0 ? 12 : local.hour % 12;
+    final ampm = local.hour < 12 ? 'AM' : 'PM';
+    final time = '$hour12:${local.minute.toString().padLeft(2, '0')} $ampm';
+    if (sameDay) return 'Starts: Today, $time';
+    return 'Starts: ${local.day} ${_months[local.month - 1]}, $time';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final m = match;
+    final live = m.isEffectivelyLive;
+    final upcoming = !live && !m.isCompleted;
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: live ? AppTheme.heroCard() : AppTheme.premiumCard(),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  if (live) const LivePill(),
+                  if (!live)
+                    GoldChip(label: m.isCompleted ? 'RESULT' : 'UPCOMING'),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text('${m.league} • ${m.format}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: AppTheme.textSecondary, fontSize: 12)),
+                  ),
+                  if (m.lastBall.isNotEmpty)
+                    Text('Last: ${m.lastBall}',
+                        style: const TextStyle(
+                            color: AppTheme.goldLight,
+                            fontWeight: FontWeight.w800)),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(m.title,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      fontSize: 20, fontWeight: FontWeight.w900)),
+              if (m.venueName.isNotEmpty) ...[
+                const SizedBox(height: 3),
+                Text('📍 ${m.venueName}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 12)),
+              ],
+              const SizedBox(height: 10),
+              // Upcoming: NO score rows — a match that has not started
+              // has no score (reference rule H4).
+              if (!upcoming)
+                for (final s in m.scores)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(s.team,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w700, fontSize: 15)),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(s.display,
+                            maxLines: 1,
+                            overflow: TextOverflow.clip,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w900,
+                                fontSize: 17,
+                                color: AppTheme.goldLight)),
+                      ],
+                    ),
+                  ),
+              if (upcoming)
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Text(_startsLine(m.startTime),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          color: AppTheme.textSecondary,
+                          fontWeight: FontWeight.w700)),
+                ),
+              if (m.result.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8),
+                  child: Text(m.result,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          color: AppTheme.goldSoft,
+                          fontWeight: FontWeight.w700)),
+                ),
+              if (m.currentBatter.isNotEmpty && live) ...[
+                const Divider(color: Colors.white12, height: 20),
+                Text('Batting: ${m.currentBatter}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12)),
+                const SizedBox(height: 2),
+                Text('Bowling: ${m.currentBowler}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 12, color: AppTheme.textSecondary)),
+              ],
+              const SizedBox(height: 6),
+              const Row(
+                children: [
+                  Icon(Icons.arrow_forward,
+                      size: 14, color: AppTheme.goldLight),
+                  SizedBox(width: 4),
+                  Text('Tap for FULL scorecard',
+                      style: TextStyle(
+                          color: AppTheme.goldLight,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700)),
+                  Spacer(),
+                  Text('Scorecard →',
+                      style: TextStyle(
+                          color: AppTheme.gold, fontSize: 12)),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
