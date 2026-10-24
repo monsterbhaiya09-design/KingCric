@@ -167,18 +167,21 @@ class _HomeScreenState extends State<HomeScreen> {
                   height: 48,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
-                    gradient: AppTheme.goldGradient,
+                    color: AppTheme.navyCard2,
                     borderRadius: BorderRadius.circular(14),
+                    border: Border.all(
+                        color: AppTheme.gold.withValues(alpha: 0.40),
+                        width: 1),
                     boxShadow: [
                       BoxShadow(
-                        color: AppTheme.gold.withValues(alpha: 0.5),
-                        blurRadius: 16,
-                        offset: const Offset(0, 6),
+                        color: Colors.black.withValues(alpha: 0.25),
+                        blurRadius: 10,
+                        offset: const Offset(0, 4),
                       ),
                     ],
                   ),
-                  child: const Text('👑',
-                      style: TextStyle(fontSize: 26)),
+                  child: const Icon(Icons.workspace_premium,
+                      size: 26, color: AppTheme.goldLight),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
