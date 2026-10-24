@@ -22,6 +22,10 @@ class AppTheme {
   static const Color liveRed = Color(0xFFFF3B30);
   static const Color blue = Color(0xFF4DA3FF);
 
+  /// FIX VIS: centered content column width (bug 4). Wide screens
+  /// cap content here; phones are narrower and unaffected.
+  static const double maxContentWidth = 700;
+
   // Premium gradients.
   static const LinearGradient goldGradient = LinearGradient(
     colors: [Color(0xFFFFD700), Color(0xFFD4AF37), Color(0xFF9C7E1A)],
