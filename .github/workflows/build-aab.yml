@@ -1,0 +1,323 @@
+# KingCric — Official Gradle AAB build on GitHub Actions
+#
+# Companion to build-apk.yml (read that file for the full history of why
+# builds run on GitHub Actions at all: the VM's sandbox blocks Java-process
+# outbound TCP, so Gradle cannot run in the VM; GitHub's runner can).
+# This workflow builds the PLAY STORE artifact: an Android App Bundle
+# (.aab), release-signed with the upload keystore. Play Console does NOT
+# accept APKs for new apps — the AAB is the submission artifact.
+#
+# HOW RELEASE SIGNING WORKS HERE (read before changing anything):
+# The repo's android/app/build.gradle.kts still wires the release build
+# type to the DEBUG signing config (its own TODO comment says so). This
+# workflow does NOT edit that repo file. Instead, the "Wire release
+# signing (CI-time patch)" step below patches a COPY of the file on the
+# runner only: it injects a key.properties-based `release` signingConfig
+# and points the release build type at it. If build.gradle.kts is ever
+# wired to key.properties properly in the repo, the patch step detects
+# that ("key.properties" already present) and skips itself.
+# The keystore itself is NEVER committed: it is decoded from the
+# RELEASE_KEYSTORE_BASE64 repo secret on the runner, used once, and dies
+# with the ephemeral runner. Passwords live ONLY in GitHub secrets.
+#
+# SECRETS REQUIRED (Settings -> Secrets -> Actions; job FAILS FAST if
+# any is unset — a debug-signed or unsigned AAB must never be produced
+# silently):
+#   RELEASE_KEYSTORE_BASE64 — base64 of the upload keystore (.jks)
+#   KEYSTORE_PASSWORD       — keystore password
+#   KEY_PASSWORD            — key password
+#   KEY_ALIAS               — key alias
+# Keystore creation is a USER-SIDE step (see FINAL-RELEASE.md): it is
+# deliberately NOT done in this workflow, because whoever creates it must
+# keep the file + passwords safe — losing them means never updating the
+# app under package com.kingcric.app again.
+#
+# Verification (all must pass, or the job fails):
+#  1. bundletool (pinned release jar) builds a universal APK set from
+#     the AAB, and aapt2 dump badging on the universal APK confirms
+#     package com.kingcric.app, the bumped versionCode, minSdk 24,
+#     targetSdk 36, and 2 permissions only.
+#  2. The universal APK's signer certificate MUST match the release
+#     keystore's certificate (apksigner --print-certs vs keytool -list).
+#     This is the guard against a debug-signed AAB slipping through.
+#  3. Size + sha256 of the AAB are printed and the AAB artifact is
+#     uploaded (retention 30 days).
+
+name: Build KingCric AAB
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '**.dart'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+      - 'android/**'
+      - '.github/workflows/build-aab.yml'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kingcric-aab
+  cancel-in-progress: true
+
+jobs:
+  build-aab:
+    name: Build release AAB (official Gradle)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fail fast if release-signing secrets are unset
+        # Runs FIRST, before any build work: a missing secret must fail
+        # loudly here, never produce a debug-signed AAB later.
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          MISSING=""
+          for v in RELEASE_KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_PASSWORD KEY_ALIAS; do
+            if [ -z "${!v:-}" ]; then MISSING="$MISSING $v"; fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "FATAL: missing release-signing secrets:$MISSING"
+            echo "Set them in Settings -> Secrets -> Actions (see FINAL-RELEASE.md). No AAB will be built."
+            exit 1
+          fi
+          echo "All 4 release-signing secrets are set (values never printed)."
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK 36 + build-tools + NDK (manual sdkmanager)
+        # Same block as build-apk.yml (setup-android@v3 failed on an
+        # earlier run; direct sdkmanager calls are more transparent).
+        run: |
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-}"
+          if [ -z "${ANDROID_HOME:-}" ]; then
+            if [ -d /usr/local/lib/android/sdk ]; then
+              echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+              export ANDROID_HOME=/usr/local/lib/android/sdk
+            elif [ -d "$HOME/Android/Sdk" ]; then
+              echo "ANDROID_HOME=$HOME/Android/Sdk" >> "$GITHUB_ENV"
+              export ANDROID_HOME="$HOME/Android/Sdk"
+            fi
+          fi
+          echo "Using ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/cmdline-tools/" || true
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" "platform-tools"
+          ls "$ANDROID_HOME/build-tools/" || true
+          ls "$ANDROID_HOME/ndk/" || true
+
+      - name: Set up Flutter 3.47.7
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.7'
+          channel: stable
+          cache: true
+
+      - name: Print build environment (diagnostics)
+        run: |
+          set -euo pipefail
+          java -version
+          flutter --version
+          ls -l android/gradlew
+          test -f android/gradle/wrapper/gradle-wrapper.jar || echo "NOTE: gradle-wrapper.jar absent; flutter build regenerates it"
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Analyze (must be clean)
+        run: flutter analyze
+
+      - name: Test (must pass)
+        run: flutter test
+
+      - name: Decode upload keystore + write key.properties
+        # Ephemeral runner only. key.properties is gitignored
+        # (android/.gitignore) and the keystore path is absolute so
+        # Gradle resolves it regardless of module working directory.
+        # Values are NEVER echoed.
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          echo "$RELEASE_KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          test -s android/app/upload-keystore.jks || { echo "FATAL: decoded keystore is empty"; exit 1; }
+          cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEY_PASSWORD
+          keyAlias=$KEY_ALIAS
+          storeFile=$GITHUB_WORKSPACE/android/app/upload-keystore.jks
+          EOF
+          echo "Keystore decoded + key.properties written (contents never printed)."
+
+      - name: Wire release signing (CI-time patch)
+        # Patches the RUNNER's copy of android/app/build.gradle.kts only.
+        # If the repo file ever gains key.properties wiring, skip.
+        # Fails loudly if the expected debug-signing block is not found,
+        # so a future build.gradle.kts rewrite cannot silently ship a
+        # debug-signed AAB.
+        run: |
+          set -euo pipefail
+          python3 - <<'PYEOF'
+          import sys
+          p = "android/app/build.gradle.kts"
+          text = open(p).read()
+          if "key.properties" in text:
+              print("build.gradle.kts already wires key.properties; patch skipped.")
+              sys.exit(0)
+          loader = (
+              "val keystoreProperties = java.util.Properties()\n"
+              "val keystorePropertiesFile = rootProject.file(\"key.properties\")\n"
+              "if (keystorePropertiesFile.exists()) {\n"
+              "    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))\n"
+              "}\n\n"
+          )
+          old_block = (
+              "    buildTypes {\n"
+              "        release {\n"
+              "            // TODO: Add your own signing config for the release build.\n"
+              "            // Signing with the debug keys for now, so `flutter run --release` works.\n"
+              "            signingConfig = signingConfigs.getByName(\"debug\")\n"
+              "        }\n"
+              "    }\n"
+          )
+          new_block = (
+              "    signingConfigs {\n"
+              "        create(\"release\") {\n"
+              "            keyAlias = keystoreProperties[\"keyAlias\"] as String\n"
+              "            keyPassword = keystoreProperties[\"keyPassword\"] as String\n"
+              "            storeFile = keystoreProperties[\"storeFile\"]?.let { file(it) }\n"
+              "            storePassword = keystoreProperties[\"storePassword\"] as String\n"
+              "        }\n"
+              "    }\n"
+              "    buildTypes {\n"
+              "        release {\n"
+              "            signingConfig = signingConfigs.getByName(\"release\")\n"
+              "        }\n"
+              "    }\n"
+          )
+          if old_block not in text:
+              print("FATAL: expected debug-signing block not found in build.gradle.kts; refusing to guess.")
+              sys.exit(1)
+          text = text.replace(old_block, new_block, 1)
+          # Insert the loader immediately before the android block
+          # (after plugins, where top-level vals belong).
+          text = text.replace("android {\n", loader + "android {\n", 1)
+          open(p, "w").write(text)
+          print("CI-time release-signing patch applied.")
+          PYEOF
+          grep -n "keystoreProperties\|signingConfigs" android/app/build.gradle.kts
+
+      - name: Build release AAB (real Gradle)
+        # Same exit-code discipline as build-apk.yml: never pipe flutter
+        # through tee (tee's exit code would mask a Gradle failure).
+        # Same --dart-define keys as the APK job; missing secrets expand
+        # to empty defines and their providers are skipped, and the
+        # build MUST NOT fail. Never echo a secret.
+        env:
+          CRIC_API_KEY: ${{ secrets.CRIC_API_KEY }}
+          ELITESPORT_API_KEY: ${{ secrets.ELITESPORT_API_KEY }}
+          ENTITYSPORT_API_KEY: ${{ secrets.ENTITYSPORT_API_KEY }}
+          SPORTSDB_API_KEY: ${{ secrets.SPORTSDB_API_KEY }}
+        run: |
+          flutter build appbundle --release \
+            --dart-define=CRIC_API_KEY="${CRIC_API_KEY:-}" \
+            --dart-define=ELITESPORT_API_KEY="${ELITESPORT_API_KEY:-}" \
+            --dart-define=ENTITYSPORT_API_KEY="${ENTITYSPORT_API_KEY:-}" \
+            --dart-define=SPORTSDB_API_KEY="${SPORTSDB_API_KEY:-}" \
+            >build-aab.log 2>&1 || BUILD_STATUS=$?
+          cat build-aab.log
+          exit "${BUILD_STATUS:-0}"
+
+      - name: Show build tail on failure
+        if: failure()
+        run: |
+          echo "===== last 200 lines of build-aab.log ====="
+          tail -n 200 build-aab.log || echo "(no build-aab.log found)"
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingcric-aab-build-log
+          path: build-aab.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Verify AAB with bundletool
+        # 1. AAB exists; size + sha256 recorded.
+        # 2. bundletool (pinned jar) builds a universal APK set; aapt2
+        #    badging on the universal APK must show package
+        #    com.kingcric.app, minSdk 24, targetSdk 36, 2 permissions.
+        # 3. Signer guard: the universal APK's certificate (apksigner
+        #    --print-certs) must match the release keystore's
+        #    certificate (keytool -list). A debug-signed AAB fails here.
+        run: |
+          set -euo pipefail
+          AAB=build/app/outputs/bundle/release/app-release.aab
+          test -f "$AAB" || { echo "FATAL: AAB not found at $AAB"; exit 1; }
+          ls -lh "$AAB"
+          sha256sum "$AAB"
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          if [ ! -d "$BT" ]; then
+            BT="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)"
+          fi
+          echo "Using build-tools: $BT"
+          # bundletool is not preinstalled on the runner; pinned release.
+          BUNDLETOOL_JAR=/tmp/bundletool-all-1.18.1.jar
+          curl -fsSL -o "$BUNDLETOOL_JAR" "https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar" \
+            || { echo "FATAL: could not download bundletool 1.18.1"; exit 1; }
+          java -jar "$BUNDLETOOL_JAR" build-apks --bundle="$AAB" --output=/tmp/kingcric-universal.apks --mode=universal
+          mkdir -p /tmp/kingcric-universal && python3 -c "
+          import zipfile
+          z = zipfile.ZipFile('/tmp/kingcric-universal.apks')
+          z.extract('universal.apk', '/tmp/kingcric-universal')
+          "
+          "$BT/aapt2" dump badging /tmp/kingcric-universal/universal.apk | tee /tmp/aab-badging.txt
+          grep -q "name='com.kingcric.app'" /tmp/aab-badging.txt || { echo "FATAL: badging package mismatch"; exit 1; }
+          grep -q "minSdkVersion:'24'" /tmp/aab-badging.txt || { echo "FATAL: badging minSdk mismatch"; exit 1; }
+          grep -q "targetSdkVersion:'36'" /tmp/aab-badging.txt || { echo "FATAL: badging targetSdk mismatch"; exit 1; }
+          grep -q "android.permission.INTERNET" /tmp/aab-badging.txt || { echo "FATAL: INTERNET permission missing"; exit 1; }
+          grep -q "android.permission.ACCESS_NETWORK_STATE" /tmp/aab-badging.txt || { echo "FATAL: ACCESS_NETWORK_STATE permission missing"; exit 1; }
+          # Signer guard: release keystore cert == APK signer cert.
+          RELEASE_SHA="$(keytool -list -v -keystore android/app/upload-keystore.jks -storepass "${KEYSTORE_PASSWORD:-}" 2>/dev/null | grep -m1 'SHA256:' | awk '{print $2}' || true)"
+          APK_SHA="$( "$BT/apksigner" verify --print-certs /tmp/kingcric-universal/universal.apk 2>/dev/null | grep -m1 'SHA-256 digest:' | awk '{print $NF}' || true)"
+          echo "Release keystore SHA-256: ${RELEASE_SHA:-<unreadable>}"
+          echo "Universal APK signer SHA-256: ${APK_SHA:-<unreadable>}"
+          if [ -z "$RELEASE_SHA" ] || [ -z "$APK_SHA" ] || [ "$RELEASE_SHA" != "$APK_SHA" ]; then
+            echo "FATAL: AAB signer does NOT match the release keystore (debug-signed or wrong key?). Refusing artifact."
+            exit 1
+          fi
+          echo "AAB verification PASSED (bundletool + badging + release signer match)."
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+
+      - name: Upload AAB artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kingcric-app-release-aab
+          path: build/app/outputs/bundle/release/app-release.aab
+          # error (not warn): a missing AAB must FAIL loudly.
+          if-no-files-found: error
+          retention-days: 30
