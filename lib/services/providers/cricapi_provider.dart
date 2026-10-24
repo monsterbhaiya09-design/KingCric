@@ -246,13 +246,72 @@ class CricApiProvider implements CricketProvider {
       final body = jsonDecode(res.body) as Map<String, dynamic>;
       _updateQuota(body);
       if (body['status'] == 'failure') return null;
-      final data = (body['data'] as Map?)?.cast<String, dynamic>();
+      // SQUAD SC: the documented shape is a Map, but a single-match
+      // list shape must not kill the whole fetch — take its first
+      // Map element instead (see _scorecardData).
+      final data = _scorecardData(body['data']);
       if (data == null || data.isEmpty) return null;
       _log('fetchScorecard', received: 1, dropped: 0, kept: 1);
-      return _matchFromScorecard(data);
+      // SQUAD SC: a parse failure inside the innings must degrade to
+      // the totals-only base match (the orchestrator turns totals
+      // into a labelled partial scorecard) — never to null. A live
+      // match with runs on the board must never lose its scorecard
+      // because one innings row had an unexpected type.
+      try {
+        return _matchFromScorecard(data);
+      } catch (_) {
+        try {
+          return _matchFromFreeApi(data);
+        } catch (_) {
+          return null;
+        }
+      }
     } catch (_) {
       return null;
     }
+  }
+
+  /// Tolerant extraction of the scorecard data block. The documented
+  /// shape is a Map; a single-match list shape yields its first Map
+  /// element; anything else yields null.
+  static Map<String, dynamic>? _scorecardData(Object? raw) {
+    if (raw is Map) return raw.cast<String, dynamic>();
+    if (raw is List) {
+      for (final e in raw) {
+        if (e is Map) return e.cast<String, dynamic>();
+      }
+    }
+    return null;
+  }
+
+  /// A player-name field that may be a plain string OR a nested
+  /// object ({"id": ..., "name": ...}). Returns '' when neither
+  /// yields a name — never throws, never renders a Map as text.
+  static String _playerName(Map<String, dynamic> m, List<String> keys) {
+    for (final k in keys) {
+      final v = m[k];
+      if (v is Map) {
+        final n = v['name'];
+        if (n != null && '$n'.trim().isNotEmpty) return '$n'.trim();
+      } else if (v != null && '$v'.trim().isNotEmpty) {
+        return '$v'.trim();
+      }
+    }
+    return '';
+  }
+
+  /// A dismissal that may be a string ("c X b Y", "not out", "") or
+  /// a nested object ({"text": ...}). Never throws.
+  static String _dismissalText(Object? v) {
+    if (v == null) return '';
+    if (v is Map) {
+      for (final k in ['text', 'dismissal', 'how', 'type']) {
+        final x = v[k];
+        if (x != null && '$x'.trim().isNotEmpty) return '$x'.trim();
+      }
+      return '';
+    }
+    return '$v'.trim();
   }
 
   /// FINAL D — Ball-level data from a /cricketScore payload, ONLY
@@ -825,7 +884,14 @@ class CricApiProvider implements CricketProvider {
   }
 
   CricketMatch _matchFromFreeApi(Map<String, dynamic> j) {
-    final teams = ((j['teams'] as List?) ?? []).map((e) => '$e').toList();
+    // SQUAD SC: tolerant — teams/score rows may carry numbers as
+    // strings or miss fields. A malformed row is skipped (or falls
+    // back to the teams list by position), never allowed to throw
+    // the whole match away: a live match with totals must keep them.
+    final teamsRaw = j['teams'];
+    final teams = teamsRaw is List
+        ? teamsRaw.map((e) => '$e').toList()
+        : <String>[];
     final teamA = ProviderParsing.titleCaseTeam(
         teams.isNotEmpty ? teams[0] : 'Team A');
     final teamB = ProviderParsing.titleCaseTeam(
@@ -840,35 +906,38 @@ class CricApiProvider implements CricketProvider {
       return null;
     }
 
-    final score = (j['score'] as List?) ?? [];
-    final hasScores = score.any((s) {
-      final m = (s as Map).cast<String, dynamic>();
-      final r = (m['r'] as num?)?.toInt() ?? 0;
-      final w = (m['w'] as num?)?.toInt() ?? 0;
-      final o = (m['o'] as num?)?.toDouble() ?? 0;
+    final scoreRaw = j['score'];
+    final scoreList = scoreRaw is List ? scoreRaw : const [];
+    final hasScores = scoreList.any((s) {
+      if (s is! Map) return false;
+      final m = s.cast<String, dynamic>();
+      final r = ProviderParsing.toInt(m['r']);
+      final w = ProviderParsing.toInt(m['w']);
+      final o = ProviderParsing.toDouble(m['o']);
       return r > 0 || w > 0 || o > 0;
     });
     // V3 BUG FIX: status text alone misclassifies in-progress matches
     // ("...need 88 runs in 78 balls" has no "live"/"won"). Resolve from
     // matchStarted/matchEnded + scores + status text together.
     final status = ProviderParsing.resolveStatus(
-      raw: j['status'] as String? ?? '',
+      raw: ProviderParsing.toStr(j['status']),
       matchStarted: asBool(j['matchStarted']),
       matchEnded: asBool(j['matchEnded']),
       hasScores: hasScores,
     );
     final scores = <TeamScore>[];
-    for (final s in score) {
-      final m = (s as Map).cast<String, dynamic>();
-      final r = (m['r'] as num?)?.toInt() ?? 0;
-      final w = (m['w'] as num?)?.toInt() ?? 0;
-      final o = (m['o'] as num?)?.toDouble() ?? 0;
+    for (var i = 0; i < scoreList.length; i++) {
+      final s = scoreList[i];
+      if (s is! Map) continue;
+      final m = s.cast<String, dynamic>();
+      final r = ProviderParsing.toInt(m['r']);
+      final w = ProviderParsing.toInt(m['w']);
+      final o = ProviderParsing.toDouble(m['o']);
       scores.add(TeamScore(
         // V3 BUG FIX: `inning` can be a comma-joined pair
         // ("Bulgaria Women,Sweden Women Inning 2") or lowercase
         // ("bulgaria women Inning 1"). Clean to ONE title-cased team.
-        team: ProviderParsing.cleanTeamName(
-            m['inning'] as String? ?? '', [teamA, teamB]),
+        team: _scoreTeam(m, i, teams, teamA, teamB),
         runs: r,
         wickets: w,
         overs: o,
@@ -876,26 +945,40 @@ class CricApiProvider implements CricketProvider {
       ));
     }
     return CricketMatch(
-      id: j['id']?.toString() ?? j['matchId']?.toString() ?? '',
+      id: ProviderParsing.toStr(j['id'] ?? j['matchId']),
       teamA: teamA,
       teamB: teamB,
-      format: j['matchType'] as String? ?? 'T20',
-      league: j['series'] as String? ?? 'International',
-      venueName: j['venue'] as String? ?? '',
-      startTime: DateTime.tryParse(j['dateTimeGMT'] as String? ?? '') ??
+      format: ProviderParsing.toStr(j['matchType'], 'T20'),
+      league: ProviderParsing.toStr(j['series'], 'International'),
+      venueName: ProviderParsing.toStr(j['venue']),
+      startTime: DateTime.tryParse(ProviderParsing.toStr(j['dateTimeGMT'])) ??
           DateTime.now(),
       status: status,
       scores: scores,
-      result: j['status'] as String? ?? '',
+      result: ProviderParsing.toStr(j['status']),
       toss: _tossText(j),
       lastUpdated: DateTime.now(),
       source: 'CricAPI',
     );
   }
 
+  /// Team name for one score row. An unresolvable inning label must
+  /// not produce a blank team row — fall back to the teams list by
+  /// position (score rows arrive in batting order).
+  static String _scoreTeam(Map<String, dynamic> m, int index,
+      List<String> teams, String teamA, String teamB) {
+    final cleaned = ProviderParsing.cleanTeamName(
+        ProviderParsing.toStr(m['inning']), [teamA, teamB]);
+    if (cleaned.isNotEmpty) return cleaned;
+    if (index < teams.length) {
+      return ProviderParsing.titleCaseTeam(teams[index]);
+    }
+    return '';
+  }
+
   String _tossText(Map<String, dynamic> j) {
-    final winner = j['tossWinner'] as String? ?? '';
-    final choice = j['tossChoice'] as String? ?? '';
+    final winner = ProviderParsing.toStr(j['tossWinner']);
+    final choice = ProviderParsing.toStr(j['tossChoice']);
     if (winner.isEmpty) return '';
     if (choice.isEmpty) return '$winner won the toss';
     return '$winner won the toss and chose to $choice';
@@ -903,19 +986,30 @@ class CricApiProvider implements CricketProvider {
 
   CricketMatch _matchFromScorecard(Map<String, dynamic> j) {
     final base = _matchFromFreeApi(j);
-    final rawInnings = (j['scorecard'] as List?) ?? [];
+    // SQUAD SC: scorecard key variants — 'scorecard' (documented),
+    // 'scoreCard', or a bare 'innings' list; a Map value is treated
+    // as an innings map (values in order). Never let a key variant
+    // produce zero innings for a match that HAS a scorecard.
+    final rawCard = j['scorecard'] ?? j['scoreCard'] ?? j['innings'];
+    final rawInnings = <Object?>[];
+    if (rawCard is List) {
+      rawInnings.addAll(rawCard);
+    } else if (rawCard is Map) {
+      rawInnings.addAll(rawCard.values);
+    }
     final innings = <Innings>[];
     var inningsNumber = 0;
     for (final raw in rawInnings) {
+      if (raw is! Map) continue;
       inningsNumber += 1;
       try {
         innings.add(_inningsFromScorecard(
-          (raw as Map).cast<String, dynamic>(),
+          raw.cast<String, dynamic>(),
           inningsNumber,
         ));
       } catch (_) {}
     }
-    final winner = j['matchWinner'] as String? ?? '';
+    final winner = ProviderParsing.toStr(j['matchWinner']);
     final result = winner.isNotEmpty ? '$winner won' : base.result;
     // SQUAD C: the envelope status is not the whole truth. A live
     // scorecard can carry a stale "Match scheduled" label (and no
@@ -932,6 +1026,33 @@ class CricApiProvider implements CricketProvider {
             i.batting.any((b) => b.balls > 0 || b.runs > 0))) {
       status = MatchStatus.live;
     }
+    // SQUAD SC: derive the Live tab's Batting:/Bowling: rows from
+    // the latest innings. No free payload names a "current" batter
+    // or bowler — that is why those rows were ALWAYS blank for real
+    // matches (only mock data set them). Derivation, documented:
+    // batters = not-out batters of the latest innings ("Name
+    // (runs*)"); bowler = the bowler with the most overs in the
+    // latest innings (best available proxy for the current bowler).
+    // Both come from real scorecard rows, never invented names.
+    var currentBatter = '';
+    var currentBowler = '';
+    if (innings.isNotEmpty) {
+      final current = innings.last;
+      final notOut = current.batting
+          .where((b) => b.notOut && b.playerName.isNotEmpty)
+          .toList();
+      if (notOut.isNotEmpty) {
+        currentBatter = notOut
+            .map((b) => '${b.playerName} (${b.runs}*)')
+            .join(' • ');
+      }
+      BowlingEntry? top;
+      for (final b in current.bowling) {
+        if (b.playerName.isEmpty) continue;
+        if (top == null || b.overs > top.overs) top = b;
+      }
+      if (top != null) currentBowler = top.playerName;
+    }
     return CricketMatch(
       id: base.id,
       teamA: base.teamA,
@@ -945,6 +1066,8 @@ class CricApiProvider implements CricketProvider {
       result: result,
       toss: base.toss,
       innings: innings,
+      currentBatter: currentBatter,
+      currentBowler: currentBowler,
       lastUpdated: DateTime.now(),
       source: base.source,
     );
@@ -952,19 +1075,28 @@ class CricApiProvider implements CricketProvider {
 
   Innings _inningsFromScorecard(
       Map<String, dynamic> j, int inningsNumber) {
-    final battingRaw = (j['batting'] as List?) ?? [];
-    final bowlingRaw = (j['bowling'] as List?) ?? [];
+    // SQUAD SC: every field is coerced, never cast. The old code
+    // used `as String?` / `as num?` throughout, so ONE variant row
+    // (nested batter object, numeric FOW over, string economy)
+    // threw, the per-innings catch dropped the WHOLE innings, and a
+    // live match with a full scorecard rendered an empty tab.
+    // Malformed rows are skipped; the innings itself survives.
+    final battingRaw = j['batting'] is List ? j['batting'] as List : const [];
+    final bowlingRaw = j['bowling'] is List ? j['bowling'] as List : const [];
     final batting = <BattingEntry>[];
     for (final b in battingRaw) {
-      final m = (b as Map).cast<String, dynamic>();
-      final dismissal = (m['dismissal'] as String? ?? '').trim();
+      if (b is! Map) continue;
+      final m = b.cast<String, dynamic>();
+      final name = _playerName(m, const ['batter', 'batsman', 'name', 'player']);
+      if (name.isEmpty) continue;
+      final dismissal = _dismissalText(m['dismissal']);
       batting.add(BattingEntry(
-        playerId: m['batter'] as String? ?? '',
-        playerName: m['batter'] as String? ?? '',
-        runs: (m['r'] as num?)?.toInt() ?? 0,
-        balls: (m['b'] as num?)?.toInt() ?? 0,
-        fours: (m['4s'] as num?)?.toInt() ?? 0,
-        sixes: (m['6s'] as num?)?.toInt() ?? 0,
+        playerId: name,
+        playerName: name,
+        runs: ProviderParsing.toInt(m['r'] ?? m['runs']),
+        balls: ProviderParsing.toInt(m['b'] ?? m['balls']),
+        fours: ProviderParsing.toInt(m['4s'] ?? m['fours']),
+        sixes: ProviderParsing.toInt(m['6s'] ?? m['sixes']),
         dismissal: dismissal.isEmpty ? 'not out' : dismissal,
         notOut: dismissal.isEmpty ||
             dismissal.toLowerCase().contains('not out'),
@@ -972,56 +1104,81 @@ class CricApiProvider implements CricketProvider {
     }
     final bowling = <BowlingEntry>[];
     for (final b in bowlingRaw) {
-      final m = (b as Map).cast<String, dynamic>();
-      final overs = (m['o'] as num?)?.toDouble() ?? 0;
-      final runs = (m['r'] as num?)?.toInt() ?? 0;
-      final wickets = (m['w'] as num?)?.toInt() ?? 0;
+      if (b is! Map) continue;
+      final m = b.cast<String, dynamic>();
+      final name = _playerName(m, const ['bowler', 'name', 'player']);
+      if (name.isEmpty) continue;
+      final overs = ProviderParsing.toDouble(m['o'] ?? m['overs']);
+      final runs = ProviderParsing.toInt(m['r'] ?? m['runs']);
+      final wickets = ProviderParsing.toInt(m['w'] ?? m['wickets']);
       bowling.add(BowlingEntry(
-        playerId: m['bowler'] as String? ?? '',
-        playerName: m['bowler'] as String? ?? '',
+        playerId: name,
+        playerName: name,
         overs: overs,
-        maidens: (m['m'] as num?)?.toInt() ?? 0,
+        maidens: ProviderParsing.toInt(m['m'] ?? m['maidens']),
         runsConceded: runs,
         wickets: wickets,
-        economy: (m['eco'] as num?)?.toDouble() ??
-            (overs > 0 ? runs / overs : 0),
-        wides: (m['wd'] as num?)?.toInt() ?? 0,
-        noBalls: (m['nb'] as num?)?.toInt() ?? 0,
+        economy: ProviderParsing.toDouble(m['eco'] ?? m['economy'],
+            overs > 0 ? runs / overs : 0),
+        wides: ProviderParsing.toInt(m['wd'] ?? m['wides']),
+        noBalls: ProviderParsing.toInt(m['nb'] ?? m['noBalls']),
       ));
     }
-    final extras = (j['extras'] as Map?)?.cast<String, dynamic>() ?? {};
-    final extrasRuns = (extras['r'] as num?)?.toInt() ?? 0;
+    final extrasRaw = j['extras'];
+    final extras = extrasRaw is Map
+        ? extrasRaw.cast<String, dynamic>()
+        : <String, dynamic>{};
+    final extrasRuns =
+        ProviderParsing.toInt(extras['r'] ?? extras['runs']);
     final extrasParts = <String>[];
     for (final key in ['b', 'lb', 'wd', 'nb', 'pen']) {
-      final v = (extras[key] as num?)?.toInt() ?? 0;
+      final v = ProviderParsing.toInt(extras[key]);
       if (v > 0) extrasParts.add('${key.toUpperCase()} $v');
     }
-    final fowRaw = (j['fallofwickets'] as List?) ?? [];
+    final fowRaw =
+        j['fallofwickets'] is List ? j['fallofwickets'] as List : const [];
     final fow = <String>[];
     for (final f in fowRaw) {
-      final m = (f as Map).cast<String, dynamic>();
-      final name = m['name'] as String? ?? '';
-      final score = (m['score'] as num?)?.toInt() ?? 0;
-      final over = m['over'] as String? ?? '';
+      if (f is! Map) continue;
+      final m = f.cast<String, dynamic>();
+      final name = ProviderParsing.toStr(m['name'] ?? m['batter'] ?? m['player']);
+      final score = ProviderParsing.toInt(m['score'] ?? m['runs']);
+      final over = ProviderParsing.toStr(m['over'] ?? m['overNumber']);
       if (name.isNotEmpty) fow.add('$score-$name ($over ov)');
     }
-    final total = (j['total'] as num?)?.toInt() ??
-        batting.fold<int>(0, (acc, b) => acc + b.runs) + extrasRuns;
-    final wickets = (j['wickets'] as num?)?.toInt() ??
-        batting.where((b) => !b.notOut).length;
+    final yetToBatRaw = j['yetToBat'] ?? j['didNotBat'];
+    final yetToBat = yetToBatRaw is List
+        ? yetToBatRaw
+            .map((e) => ProviderParsing.toStr(e))
+            .where((s) => s.isNotEmpty)
+            .toList()
+        : const <String>[];
+    final partnershipsRaw = j['partnerships'];
+    final partnerships = partnershipsRaw is List
+        ? partnershipsRaw
+            .map((e) => ProviderParsing.toStr(e))
+            .where((s) => s.isNotEmpty)
+            .toList()
+        : const <String>[];
+    final total = ProviderParsing.toInt(j['total'],
+        batting.fold<int>(0, (acc, b) => acc + b.runs) + extrasRuns);
+    final wickets = ProviderParsing.toInt(
+        j['wickets'], batting.where((b) => !b.notOut).length);
     return Innings(
       team: ProviderParsing.cleanTeamName(
-          j['inning'] as String? ?? '', null),
+          ProviderParsing.toStr(j['inning'] ?? j['team']), null),
       inningsNumber: inningsNumber,
       total: total,
       wickets: wickets,
-      overs: (j['overs'] as num?)?.toDouble() ?? 0,
+      overs: ProviderParsing.toDouble(j['overs']),
       batting: batting,
       bowling: bowling,
       fallOfWickets: fow,
       extrasRuns: extrasRuns,
       extrasText:
           extrasParts.isEmpty ? '' : '${extrasParts.join(', ')} ($extrasRuns)',
+      yetToBat: yetToBat,
+      partnerships: partnerships,
     );
   }
 }
