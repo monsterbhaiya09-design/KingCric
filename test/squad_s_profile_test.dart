@@ -79,9 +79,10 @@ void main() {
       expect(find.text('Role'), findsOneWidget);
       expect(find.text('Batter'), findsWidgets);
       expect(find.text('Batting style'), findsOneWidget);
-      // Source line: dataset size + per-player count.
-      expect(find.textContaining('Real • Cricsheet • 420 matches'), findsOneWidget);
-      expect(find.textContaining('21 for this player'), findsOneWidget);
+      // Source line: per-player count (dataset size no longer
+      // hardcoded — full archive replaced the 420-match sample).
+      expect(find.textContaining('Real • Cricsheet'), findsOneWidget);
+      expect(find.textContaining('21 matches for this player'), findsOneWidget);
       // Stats sections present.
       expect(find.text('Overall — All Formats'), findsOneWidget);
       expect(find.text('All Formats — Full Table'), findsOneWidget);
