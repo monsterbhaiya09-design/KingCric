@@ -63,24 +63,10 @@ class KingMatchCard extends StatelessWidget {
     return s == 'demo' || s == 'mock';
   }
 
-  /// Title Case for display names (Final P). Only words that are
-  /// uniformly cased AND long enough to be real words are changed:
-  /// "BULGARIA WOMEN" -> "Bulgaria Women", "bulgaria women" ->
-  /// "Bulgaria Women". Short acronyms ("IPL", "ODI") and mixed-case
-  /// proper names ("McCullum", "de Kock") are left untouched, so
-  /// title-casing can never corrupt a real name.
-  static String _titleCase(String input) {
-    return input.split(' ').map((word) {
-      return word.split('-').map((part) {
-        final hasLetter = part.contains(RegExp(r'[A-Za-z]'));
-        if (!hasLetter || part.length < 4) return part;
-        final upper = part == part.toUpperCase();
-        final lower = part == part.toLowerCase();
-        if (!upper && !lower) return part;
-        return part[0].toUpperCase() + part.substring(1).toLowerCase();
-      }).join('-');
-    }).join(' ');
-  }
+  /// Title Case for display names (FIX UX: now shared via
+  /// [DisplayText] so every screen agrees; format codes are NOT
+  /// title-cased here — use [DisplayText.formatLabel] for those).
+  static String _titleCase(String input) => DisplayText.titleCase(input);
 
   String _startsLine(DateTime start) {
     final now = DateTime.now();
@@ -101,11 +87,11 @@ class KingMatchCard extends StatelessWidget {
     final live = m.isEffectivelyLive;
     final upcoming = !live && !m.isCompleted;
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: 10),
       decoration: live ? AppTheme.heroCard() : AppTheme.premiumCard(),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(18),
         child: Padding(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -119,7 +105,7 @@ class KingMatchCard extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                        '${_titleCase(m.league)} • ${m.format}',
+                        '${_titleCase(m.league)} • ${DisplayText.formatLabel(m.format)}',
                         maxLines: 1,
                         softWrap: false,
                         overflow: TextOverflow.ellipsis,
@@ -141,15 +127,24 @@ class KingMatchCard extends StatelessWidget {
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 20, fontWeight: FontWeight.w900)),
+                      fontSize: 19, fontWeight: FontWeight.w800)),
               if (m.venueName.isNotEmpty) ...[
                 const SizedBox(height: 3),
-                Text('📍 ${_titleCase(m.venueName)}',
-                    maxLines: 1,
-                    softWrap: false,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: AppTheme.textSecondary, fontSize: 12)),
+                Row(
+                  children: [
+                    const Icon(Icons.location_on_outlined,
+                        size: 13, color: AppTheme.textSecondary),
+                    const SizedBox(width: 3),
+                    Expanded(
+                      child: Text(_titleCase(m.venueName),
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12)),
+                    ),
+                  ],
+                ),
               ],
               const SizedBox(height: 10),
               // Upcoming: NO score rows — a match that has not started
@@ -200,12 +195,17 @@ class KingMatchCard extends StatelessWidget {
                           color: AppTheme.goldSoft,
                           fontWeight: FontWeight.w700)),
                 ),
+              // FIX UX: each row guarded on its OWN data. The old
+              // code showed the Bowling row whenever the Batting
+              // row had data, leaving a blank "Bowling:" label.
               if (m.currentBatter.isNotEmpty && live) ...[
                 const Divider(color: Colors.white12, height: 20),
                 Text('Batting: ${m.currentBatter}',
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(fontSize: 12)),
+              ],
+              if (m.currentBowler.isNotEmpty && live) ...[
                 const SizedBox(height: 2),
                 Text('Bowling: ${m.currentBowler}',
                     maxLines: 1,
