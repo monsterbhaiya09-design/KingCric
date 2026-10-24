@@ -126,7 +126,7 @@ class MatchDetailScreen extends StatefulWidget {
 }
 
 class _MatchDetailScreenState extends State<MatchDetailScreen>
-    with SingleTickerProviderStateMixin {
+    with TickerProviderStateMixin {
   late TabController _tabs;
   late CricketMatch _match;
   // Cached once in initState — NEVER recreated in build (recreating a
@@ -153,6 +153,24 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   Future<MatchBallData>? _ballDataFuture;
   Future<MatchBallData> get _ballDataFutureCached =>
       _ballDataFuture ??= ApiService().fetchBallData(_match);
+
+  /// FIX VIS (bug 2): ball-data grace period. The ball-data load
+  /// can take very long (multi-MB asset parse, especially on web),
+  /// during which the Live tab sat on "Loading ball-by-ball…"
+  /// forever. A one-shot 12s animation flips [_ballGraceExpired]
+  /// so the UI always lands on the honest no-data state.
+  /// Deliberately an AnimationController, NOT Future.timeout:
+  /// a pending Timer breaks pumpAndSettle in widget tests that
+  /// pump this screen without a warmed asset cache, while a
+  /// one-shot animation always settles (same reason LivePulseDot
+  /// uses TweenAnimationBuilder instead of a repeating
+  /// controller). Started only for live/completed matches —
+  /// upcoming matches never fetch ball data at all.
+  AnimationController? _ballGraceController;
+  bool _ballGraceExpired = false;
+
+  /// FIX VIS (bug 2): grace period for the ball-data load.
+  static const Duration _ballGracePeriod = Duration(seconds: 12);
 
   /// Gender for Cricsheet queries: providers write "Pakistan
   /// Women" for women's matches and bare names for men's;
@@ -195,6 +213,18 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     // MATCH-CENTRIC tabs: Live/Scorecard | Squad | Venue+H2H | Prediction.
     _tabs = TabController(length: 5, vsync: this);
     _coverageFuture = ApiService().cricsheetCoverageLabel;
+    // FIX VIS (bug 2): start the ball-data grace clock for
+    // live/completed matches only (upcoming matches never fetch).
+    if (_match.isCompleted || _match.isEffectivelyLive) {
+      _ballGraceController =
+          AnimationController(vsync: this, duration: _ballGracePeriod)
+            ..addStatusListener((status) {
+              if (status == AnimationStatus.completed && mounted) {
+                setState(() => _ballGraceExpired = true);
+              }
+            })
+            ..forward();
+    }
     _playersFuture = ApiService().fetchPlayers();
     _venuesFuture = ApiService().fetchVenues();
     // NOTE: Cricsheet futures are lazy (getters above) — NOT
@@ -384,8 +414,12 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   String _squadSourceLabel(String sourceKey) {
     switch (sourceKey) {
       case 'cricsheet':
-        return 'Squad: Real • Cricsheet • calculated from ball-by-ball '
-            'data';
+        // FIX VIS (bug 5): label the LAYER, not just the source.
+        // This is player HISTORY from Cricsheet; the live-scores
+        // feed is a separate layer (Home banner says when it is
+        // demo data). The two must never read as contradicting.
+        return 'Squad history: Real • Cricsheet • calculated from '
+            'ball-by-ball data';
       case 'official':
         return 'Squad: official squad list';
       case 'team':
@@ -498,6 +532,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   @override
   void dispose() {
     _tabs.dispose();
+    _ballGraceController?.dispose();
     super.dispose();
   }
 
@@ -505,7 +540,18 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   Widget build(BuildContext context) {
     final lang = context.watch<LanguageProvider>();
     return Scaffold(
+      // FIX VIS (bug 1): the body must NEVER extend behind the
+      // fixed AppBar + TabBar. Geometry is correct by construction
+      // (verified: hero top sits below the tab bar at rest and
+      // after scroll-back), but the tall fixed header + only-14px
+      // clearance made scrolling cards read as "cut off behind
+      // the tab bar". Explicit opt-out + a crisp shadow edge under
+      // the bar + 20px top clearance + the centered column make
+      // the boundary unambiguous.
+      extendBodyBehindAppBar: false,
       appBar: AppBar(
+        elevation: 4,
+        shadowColor: Colors.black.withValues(alpha: 0.5),
         // Fixture title: up to 2 lines, never mid-word cut (P5).
         // Body hero repeats it at 24px; the AppBar keeps it compact.
         title: Text(_match.title,
@@ -545,11 +591,13 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
       body: TabBarView(
         controller: _tabs,
         children: [
-          _liveTab(lang),
-          _scorecardTab(lang),
-          _squadTab(),
-          _venueH2HTab(lang),
-          _predictionTab(),
+          // FIX VIS (bug 4): centered max-width column on wide
+          // screens; a no-op on phones.
+          CenteredContent(child: _liveTab(lang)),
+          CenteredContent(child: _scorecardTab(lang)),
+          CenteredContent(child: _squadTab()),
+          CenteredContent(child: _venueH2HTab(lang)),
+          CenteredContent(child: _predictionTab()),
         ],
       ),
     );
@@ -561,7 +609,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     final scoreA = _match.scoreOf(_match.teamA);
     final scoreB = _match.scoreOf(_match.teamB);
     return ListView(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.fromLTRB(14, 20, 14, 14),
       children: [
         // Hero live score — big, gold, animated.
         KingGradientCard(
@@ -830,14 +878,13 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     return (inn.total * 6 / balls).toStringAsFixed(2);
   }
 
-  /// "Last updated HH:MM" — shown only when the match carries a
-  /// timestamp. Never a fake timestamp.
+  /// "Last updated" with DATE + time (FIX VIS bug 5) — shown
+  /// only when the match carries a timestamp. Never a fake
+  /// timestamp, never a bare time.
   String? _lastUpdatedLabel() {
     final lu = _match.lastUpdated;
     if (lu == null) return null;
-    final hh = lu.hour.toString().padLeft(2, '0');
-    final mm = lu.minute.toString().padLeft(2, '0');
-    return 'Last updated $hh:$mm';
+    return 'Last updated ${DisplayText.lastUpdatedLabel(lu)}';
   }
 
   Widget _infoRow(String label, String value) {
@@ -917,9 +964,13 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           );
         }
         if (snap.connectionState == ConnectionState.waiting) {
-          // Static placeholder on purpose: an animating spinner
-          // here would keep pumpAndSettle spinning while the
-          // (slow, 25 MB) ball-data load runs.
+          // Grace-expired waiting: the 12s animation clock ran
+          // out while the load was still pending — land on the
+          // honest no-data state instead of a stuck loader
+          // (FIX VIS bug 2). Before expiry, a static loading
+          // line on purpose: an animating spinner here would
+          // keep pumpAndSettle spinning while the load runs.
+          if (_ballGraceExpired) return _ballDataNoDataColumn();
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -934,16 +985,37 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             ],
           );
         }
-        // Completed without ball data: honest no-data states.
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const BallStrip(),
-            MilestoneTracker(innings: _match.innings),
-            OverTimeline(innings: _match.innings),
-          ],
-        );
+        // Done without ball data (error or empty): honest
+        // no-data state, never a stuck loader.
+        return _ballDataNoDataColumn();
       },
+    );
+  }
+
+  /// Honest no-data state for the visual-live section: the strip's
+  /// own empty line plus the reason for this match state.
+  Widget _ballDataNoDataColumn() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const BallStrip(),
+        Padding(
+          padding: const EdgeInsets.only(left: 12, bottom: 8),
+          child: Text(
+            _match.isCompleted || _match.isEffectivelyLive
+                ? 'Ball-by-ball not available — the free provider '
+                    'does not supply a per-ball feed for this match.'
+                : 'Ball-by-ball not available — this match has not '
+                    'started yet.',
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+                color: AppTheme.textSecondary, fontSize: 12),
+          ),
+        ),
+        MilestoneTracker(innings: _match.innings),
+        OverTimeline(innings: _match.innings),
+      ],
     );
   }
 
@@ -1002,7 +1074,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
 
   Widget _scorecardTab(LanguageProvider lang) {
     return ListView(
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.fromLTRB(14, 20, 14, 14),
       children: [
         // Match context header — always visible on scorecard.
         KingGradientCard(
@@ -1646,7 +1718,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
         }
 
         return ListView(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.fromLTRB(14, 20, 14, 14),
           children: [
             const PremiumSectionHeader(
                 title: 'Squad — tap a player for full profile',
@@ -1771,7 +1843,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             (venue.totalMatches > 0 || venue.pitchType.isNotEmpty);
 
         return ListView(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.fromLTRB(14, 20, 14, 14),
           children: [
             PremiumSectionHeader(
                 title: lang.t('venue_stats'), icon: Icons.stadium_outlined),
@@ -1847,7 +1919,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                         '${csVenue.batFirstWinPct.toStringAsFixed(0)}%'),
                     const SizedBox(height: 8),
                     const Text(
-                        'Real • Cricsheet',
+                        'History: Real • Cricsheet',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -1886,7 +1958,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
               padding: const EdgeInsets.only(top: 6, bottom: 10),
               child: Text(
                   csH2HMatches > 0
-                      ? 'Real • Cricsheet'
+                      ? 'History: Real • Cricsheet'
                       : h2hTotal > 0
                           ? 'Source: ${_match.source.isNotEmpty ? _match.source : 'provider'}'
                           : lang.t('no_h2h_data'),
@@ -2009,7 +2081,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
         final withData = preds.where((p) => p.hasData).toList();
         final noData = preds.where((p) => !p.hasData).toList();
         return ListView(
-          padding: const EdgeInsets.all(14),
+          padding: const EdgeInsets.fromLTRB(14, 20, 14, 14),
           children: [
             const PremiumSectionHeader(
                 title: 'Who will fire? — King Prediction',
