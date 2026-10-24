@@ -9,8 +9,11 @@ import '../services/cricsheet_service.dart';
 import '../services/prediction_engine.dart';
 import '../utils/app_theme.dart';
 import '../utils/strings.dart';
+import '../widgets/ball_strip.dart';
 import '../widgets/h2h_card.dart';
+import '../widgets/milestone_tracker.dart';
 import '../widgets/over_graph.dart';
+import '../widgets/over_timeline.dart';
 import '../widgets/prediction_card.dart';
 import '../widgets/premium_widgets.dart';
 import '../widgets/squad_player_card.dart';
@@ -142,6 +145,13 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   Future<Map<String, int>>? _cricsheetH2HFuture;
   Future<VenueStats?>? _cricsheetVenueFuture;
   Future<List<Matchup>>? _cricsheetMatchupsFuture;
+  // FINAL MERGE — ball-level data for visual live, lazy like the
+  // other Cricsheet futures: created only when the Live tab needs
+  // it, never in initState (the 25 MB parse must not run on every
+  // match open just for a strip).
+  Future<MatchBallData>? _ballDataFuture;
+  Future<MatchBallData> get _ballDataFutureCached =>
+      _ballDataFuture ??= ApiService().fetchBallData(_match);
 
   /// Gender for Cricsheet queries: providers write "Pakistan
   /// Women" for women's matches and bare names for men's;
@@ -612,6 +622,14 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             ],
           ),
         ),
+        // VISUAL LIVE (Final merge: wired to Squad D's
+        // ApiService.fetchBallData). The ball strip and per-over
+        // runs render ONLY when the ball data actually has balls,
+        // with its source label; otherwise the widgets' honest
+        // no-data states render — never synthesised balls, and
+        // never the single lastBall token dressed up as a strip
+        // (that token already has its own "Last ball" chip above).
+        _visualLiveSection(),
         if (scoreA != null && scoreB != null) ...[
           const PremiumSectionHeader(
               title: 'Target & Equation', icon: Icons.track_changes),
@@ -756,6 +774,138 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
 
   // ---------------- FULL SCORECARD ----------------
 
+  /// FINAL MERGE — visual live wired to Squad D's fetchBallData.
+  /// Upcoming matches never trigger a fetch (no balls exist yet).
+  /// Milestones + the over timeline's wicket markers come from the
+  /// loaded scorecard in every branch; only the ball strip and
+  /// per-over runs wait on ball data.
+  Widget _visualLiveSection() {
+    if (!_match.isCompleted && !_match.isEffectivelyLive) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const BallStrip(),
+          MilestoneTracker(innings: _match.innings),
+          OverTimeline(innings: _match.innings),
+        ],
+      );
+    }
+    return FutureBuilder<MatchBallData>(
+      future: _ballDataFutureCached,
+      builder: (context, snap) {
+        final data = snap.data;
+        if (data != null && data.hasBallData) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              BallStrip(
+                balls: _ballTokens(data),
+                teamLabel: data.overs.isNotEmpty
+                    ? data.overs.last.battingTeam
+                    : null,
+              ),
+              if (data.source.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(left: 12, bottom: 8),
+                  child: Text(
+                    'Ball data: ${data.source}'
+                    '${data.matchDate.isNotEmpty ? ' • ${data.matchDate}' : ''}',
+                    style: const TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 11),
+                  ),
+                ),
+              MilestoneTracker(innings: _match.innings),
+              OverTimeline(
+                innings: _match.innings,
+                overRunsByInnings: _overRunsByInnings(data),
+              ),
+            ],
+          );
+        }
+        if (snap.connectionState == ConnectionState.waiting) {
+          // Static placeholder on purpose: an animating spinner
+          // here would keep pumpAndSettle spinning while the
+          // (slow, 25 MB) ball-data load runs.
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(12),
+                child: Text('Loading ball-by-ball…',
+                    style: TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 12)),
+              ),
+              MilestoneTracker(innings: _match.innings),
+              OverTimeline(innings: _match.innings),
+            ],
+          );
+        }
+        // Completed without ball data: honest no-data states.
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const BallStrip(),
+            MilestoneTracker(innings: _match.innings),
+            OverTimeline(innings: _match.innings),
+          ],
+        );
+      },
+    );
+  }
+
+  /// BallOutcome -> BallStrip token. Runs > 6 on a legal ball
+  /// (overthrows) have no token in BallStrip's vocabulary — they
+  /// are dropped, never mislabelled.
+  static List<String> _ballTokens(MatchBallData data) {
+    final out = <String>[];
+    for (final b in data.balls) {
+      if (b.isWicket) {
+        out.add('W');
+      } else if (b.isWide) {
+        out.add('Wd');
+      } else if (b.isNoBall) {
+        out.add('Nb');
+      } else if (b.runs >= 0 && b.runs <= 6) {
+        out.add('${b.runs}');
+      }
+    }
+    return out;
+  }
+
+  /// Per-over runs keyed by POSITION in the scorecard innings list
+  /// (ball data groups by source innings index, in first-seen
+  /// order). An innings with an unplaceable over number (-1
+  /// bucket) is left out, so it falls back to the timeline's
+  /// honest caption instead of misattributed runs.
+  static Map<int, List<int>> _overRunsByInnings(MatchBallData data) {
+    final byInn = <int, List<OverSummary>>{};
+    final order = <int>[];
+    for (final o in data.overs) {
+      if (!byInn.containsKey(o.inningsIndex)) {
+        byInn[o.inningsIndex] = [];
+        order.add(o.inningsIndex);
+      }
+      byInn[o.inningsIndex]!.add(o);
+    }
+    final out = <int, List<int>>{};
+    for (var pos = 0; pos < order.length; pos++) {
+      final overs = byInn[order[pos]]!;
+      if (overs.any((o) => o.overNumber < 0)) continue;
+      final sorted = [...overs]
+        ..sort((a, b) => a.overNumber.compareTo(b.overNumber));
+      var maxOver = 0;
+      for (final o in sorted) {
+        if (o.overNumber > maxOver) maxOver = o.overNumber;
+      }
+      final runs = List<int>.filled(maxOver + 1, 0);
+      for (final o in sorted) {
+        runs[o.overNumber] = o.runs;
+      }
+      out[pos] = runs;
+    }
+    return out;
+  }
+
   Widget _scorecardTab(LanguageProvider lang) {
     return ListView(
       padding: const EdgeInsets.all(14),
@@ -811,12 +961,23 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                 '${formatCricketOvers(inn.overs)} overs • Innings ${inn.inningsNumber} • RR ${_runRate(inn)}',
             icon: Icons.sports_cricket,
           ),
-          _battingTable(inn),
-          const SizedBox(height: 10),
-          _extrasRow(inn),
-          const SizedBox(height: 12),
-          _bowlingTable(inn),
-          const SizedBox(height: 12),
+          // FINAL MERGE — hide-when-empty: a section with no rows
+          // renders nothing (not even its spacer), never a header
+          // over fake/zero rows. FOW / partnerships / yet-to-bat
+          // already shrank when empty; batting / bowling / extras
+          // are guarded here and inside their builders.
+          if (inn.batting.isNotEmpty) ...[
+            _battingTable(inn),
+            const SizedBox(height: 10),
+          ],
+          if (inn.extrasRuns > 0 || inn.extrasText.isNotEmpty) ...[
+            _extrasRow(inn),
+            const SizedBox(height: 12),
+          ],
+          if (inn.bowling.isNotEmpty) ...[
+            _bowlingTable(inn),
+            const SizedBox(height: 12),
+          ],
           _fallOfWickets(inn),
           _partnerships(inn),
           _yetToBat(inn),
@@ -876,6 +1037,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   }
 
   Widget _battingTable(Innings inn) {
+    if (inn.batting.isEmpty) return const SizedBox.shrink();
     return KingGradientCard(
       padding: EdgeInsets.zero,
       child: Column(
@@ -1053,6 +1215,9 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   }
 
   Widget _extrasRow(Innings inn) {
+    if (inn.extrasRuns <= 0 && inn.extrasText.isEmpty) {
+      return const SizedBox.shrink();
+    }
     final extrasLabel = inn.extrasText.isEmpty
         ? 'Extras: ${inn.extrasRuns}'
         : 'Extras: ${inn.extrasText}';
@@ -1075,6 +1240,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   }
 
   Widget _bowlingTable(Innings inn) {
+    if (inn.bowling.isEmpty) return const SizedBox.shrink();
     return KingGradientCard(
       padding: EdgeInsets.zero,
       child: Column(
