@@ -4,6 +4,9 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+import java.io.FileInputStream
+import java.util.Properties
+
 // FINAL MERGE — proper release signing wiring (replaces the old
 // debug-signing TODO). When android/key.properties exists (Play
 // Store release: written by the AAB workflow from secrets, never
@@ -14,9 +17,9 @@ plugins {
 // CI-time patch step detects "key.properties" in this file and
 // skips itself, so it can never double-apply.
 val keystorePropertiesFile = rootProject.file("key.properties")
-val keystoreProperties = java.util.Properties()
+val keystoreProperties = Properties()
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 android {
