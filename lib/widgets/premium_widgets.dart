@@ -46,10 +46,46 @@ class DisplayText {
       }).join('-');
     }).join(' ');
   }
+
+  /// "Last updated" label with DATE + time (FIX VIS): a bare
+  /// "HH:MM" is meaningless the next day. Format matches the
+  /// fixture dates already used elsewhere ("25 Oct, 5:30 AM").
+  static String lastUpdatedLabel(DateTime dt) {
+    const months = [
+      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+    ];
+    final mon = months[dt.month - 1];
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    return '${dt.day} $mon ${dt.year}, $hh:$mm';
+  }
 }
 
 /// V2 premium shared widgets: gradient cards, live pulse, stat bars,
 /// section headers. No new dependencies — pure Flutter.
+
+/// FIX VIS — centered max-width content column (bug 4): on wide
+/// (desktop/tablet) viewports a full-width ListView leaves one card
+/// followed by huge empty space, and 720-wide scorecard tables hug
+/// the left ~38% of the screen. Constraining scrollables to
+/// [AppTheme.maxContentWidth] and centering them makes wide layouts
+/// look intentional. On phones (width < max) this is a no-op: the
+/// child simply fills the viewport width.
+class CenteredContent extends StatelessWidget {
+  final Widget child;
+  const CenteredContent({super.key, required this.child});
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: ConstrainedBox(
+        constraints:
+            const BoxConstraints(maxWidth: AppTheme.maxContentWidth),
+        child: child,
+      ),
+    );
+  }
+}
 
 /// Gold-bordered gradient card wrapper.
 class KingGradientCard extends StatelessWidget {
