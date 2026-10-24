@@ -63,6 +63,25 @@ class KingMatchCard extends StatelessWidget {
     return s == 'demo' || s == 'mock';
   }
 
+  /// Title Case for display names (Final P). Only words that are
+  /// uniformly cased AND long enough to be real words are changed:
+  /// "BULGARIA WOMEN" -> "Bulgaria Women", "bulgaria women" ->
+  /// "Bulgaria Women". Short acronyms ("IPL", "ODI") and mixed-case
+  /// proper names ("McCullum", "de Kock") are left untouched, so
+  /// title-casing can never corrupt a real name.
+  static String _titleCase(String input) {
+    return input.split(' ').map((word) {
+      return word.split('-').map((part) {
+        final hasLetter = part.contains(RegExp(r'[A-Za-z]'));
+        if (!hasLetter || part.length < 4) return part;
+        final upper = part == part.toUpperCase();
+        final lower = part == part.toLowerCase();
+        if (!upper && !lower) return part;
+        return part[0].toUpperCase() + part.substring(1).toLowerCase();
+      }).join('-');
+    }).join(' ');
+  }
+
   String _startsLine(DateTime start) {
     final now = DateTime.now();
     final local = start.toLocal();
@@ -99,29 +118,35 @@ class KingMatchCard extends StatelessWidget {
                     GoldChip(label: m.isCompleted ? 'RESULT' : 'UPCOMING'),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text('${m.league} • ${m.format}',
+                    child: Text(
+                        '${_titleCase(m.league)} • ${m.format}',
                         maxLines: 1,
+                        softWrap: false,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                             color: AppTheme.textSecondary, fontSize: 12)),
                   ),
                   if (m.lastBall.isNotEmpty)
                     Text('Last: ${m.lastBall}',
+                        maxLines: 1,
+                        softWrap: false,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
                             color: AppTheme.goldLight,
                             fontWeight: FontWeight.w800)),
                 ],
               ),
               const SizedBox(height: 10),
-              Text(m.title,
+              Text(_titleCase(m.title),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                       fontSize: 20, fontWeight: FontWeight.w900)),
               if (m.venueName.isNotEmpty) ...[
                 const SizedBox(height: 3),
-                Text('📍 ${m.venueName}',
+                Text('📍 ${_titleCase(m.venueName)}',
                     maxLines: 1,
+                    softWrap: false,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         color: AppTheme.textSecondary, fontSize: 12)),
@@ -136,8 +161,9 @@ class KingMatchCard extends StatelessWidget {
                     child: Row(
                       children: [
                         Expanded(
-                          child: Text(s.team,
+                          child: Text(_titleCase(s.team),
                               maxLines: 1,
+                              softWrap: false,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
                                   fontWeight: FontWeight.w700, fontSize: 15)),
@@ -145,7 +171,8 @@ class KingMatchCard extends StatelessWidget {
                         const SizedBox(width: 8),
                         Text(s.display,
                             maxLines: 1,
-                            overflow: TextOverflow.clip,
+                            softWrap: false,
+                            overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                                 fontWeight: FontWeight.w900,
                                 fontSize: 17,
