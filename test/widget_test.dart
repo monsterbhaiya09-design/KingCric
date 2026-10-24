@@ -484,7 +484,7 @@ void main() {
         find.byType(ListView), const Offset(0, -5000), 10000);
     await tester.pumpAndSettle();
     expect(
-        find.text('Real • Cricsheet • 420 matches • 4 for this player'),
+        find.text('Real • Cricsheet • 4 matches for this player'),
         findsOneWidget);
     expect(find.text('Complete'), findsNothing);
     // Empty Recent Form section is hidden (P-P3) — scroll to the
