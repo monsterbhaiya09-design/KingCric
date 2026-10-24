@@ -5,6 +5,7 @@ import '../models/match.dart';
 import '../models/player.dart';
 import '../models/venue.dart';
 import '../services/api_service.dart';
+import '../services/auto_update_service.dart';
 import '../services/cricsheet_service.dart';
 import '../services/prediction_engine.dart';
 import '../utils/app_theme.dart';
@@ -178,6 +179,14 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   Future<List<Matchup>> get _matchupsFuture =>
       _cricsheetMatchupsFuture ??= _loadCricsheetMatchups();
   bool _refreshingDetail = false;
+  // MERGE: manual-only pre-match update (user rule: NO auto
+  // refresh for this feature — data updates only when the user
+  // presses the Update button). Guards double-presses.
+  bool _manualUpdating = false;
+  // MERGE D coverage future: created ONCE in initState. Creating
+  // it inline in build would re-fire on every rebuild and never
+  // let pumpAndSettle settle (and would re-parse assets in prod).
+  late final Future<String> _coverageFuture;
 
   @override
   void initState() {
@@ -185,6 +194,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     _match = widget.match;
     // MATCH-CENTRIC tabs: Live/Scorecard | Squad | Venue+H2H | Prediction.
     _tabs = TabController(length: 5, vsync: this);
+    _coverageFuture = ApiService().cricsheetCoverageLabel;
     _playersFuture = ApiService().fetchPlayers();
     _venuesFuture = ApiService().fetchVenues();
     // NOTE: Cricsheet futures are lazy (getters above) — NOT
@@ -283,6 +293,43 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     }
   }
 
+  /// MERGE: manual Update button handler (user rule: update ONLY
+  /// on press). Force-refreshes this match via
+  /// AutoUpdateService.refreshMatchData, then reloads the detail
+  /// so Squad / Venue / H2H show the fresh aggregates. On failure
+  /// the old data stays and the honest reason is shown — never
+  /// fake data, never a silent no-op.
+  Future<void> _onManualUpdate() async {
+    if (_manualUpdating) return;
+    setState(() => _manualUpdating = true);
+    try {
+      final svc = context.read<AutoUpdateService>();
+      final res = await svc.refreshMatchData(_match);
+      if (!mounted) return;
+      if (res.success) {
+        await _refreshDetail(force: true);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Data updated.')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(res.message)),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text(
+                  'Could not update — showing last verified data.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _manualUpdating = false);
+    }
+  }
+
   /// Resolve a team's squad from the loaded player list.
   ///
   /// Fallback chain (never blank, never fake):
@@ -338,7 +385,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     switch (sourceKey) {
       case 'cricsheet':
         return 'Squad: Real • Cricsheet • calculated from ball-by-ball '
-            'data (2024–2026 dataset)';
+            'data';
       case 'official':
         return 'Squad: official squad list';
       case 'team':
@@ -465,6 +512,24 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(fontSize: 17)),
+        // MERGE: manual Update button (user rule) — pressing it
+        // force-refreshes this match's data + squad aggregates;
+        // nothing updates for this match unless pressed.
+        actions: [
+          _manualUpdating
+              ? const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 16),
+                  child: SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2)),
+                )
+              : TextButton.icon(
+                  onPressed: _onManualUpdate,
+                  icon: const Icon(Icons.refresh, size: 18),
+                  label: const Text('Update'),
+                ),
+        ],
         bottom: TabBar(
           controller: _tabs,
           isScrollable: true,
@@ -512,7 +577,8 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                         label: _match.isCompleted ? 'RESULT' : 'UPCOMING'),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text('${_match.league} • ${_match.format}',
+                    child: Text(
+                        '${DisplayText.titleCase(_match.league)} • ${DisplayText.formatLabel(_match.format)}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -521,18 +587,28 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                 ],
               ),
               const SizedBox(height: 14),
-              Text(_match.title,
+              Text(DisplayText.titleCase(_match.title),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 24, fontWeight: FontWeight.w900)),
+                      fontSize: 23, fontWeight: FontWeight.w800)),
               const SizedBox(height: 4),
               if (_match.venueName.isNotEmpty)
-                Text('📍 ${_match.venueName}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: AppTheme.textSecondary, fontSize: 13)),
+                Row(
+                  children: [
+                    const Icon(Icons.location_on_outlined,
+                        size: 13, color: AppTheme.textSecondary),
+                    const SizedBox(width: 3),
+                    Expanded(
+                      child: Text(
+                          DisplayText.titleCase(_match.venueName),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 13)),
+                    ),
+                  ],
+                ),
               if (_lastUpdatedLabel() != null) ...[
                 const SizedBox(height: 6),
                 Text(_lastUpdatedLabel()!,
@@ -548,7 +624,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                   child: Row(
                     children: [
                       Expanded(
-                        child: Text(s.team,
+                        child: Text(DisplayText.titleCase(s.team),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -574,50 +650,68 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                         color: AppTheme.goldSoft,
                         fontWeight: FontWeight.w700)),
               ],
-              if (_match.isEffectivelyLive) ...[
+              if (_match.isEffectivelyLive &&
+                  (_match.currentBatter.isNotEmpty ||
+                      _match.currentBowler.isNotEmpty)) ...[
                 const Divider(color: Colors.white12, height: 24),
-                Text('Batting: ${_match.currentBatter}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(fontSize: 13)),
-                const SizedBox(height: 4),
-                Text('Bowling: ${_match.currentBowler}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        fontSize: 13, color: AppTheme.textSecondary)),
-                if (_match.lastBall.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      const Text('Last ball: ',
-                          style: TextStyle(
-                              color: AppTheme.textSecondary, fontSize: 12)),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: AppTheme.gold.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                              color: AppTheme.gold.withValues(alpha: 0.5)),
-                        ),
-                        child: Text(_match.lastBall,
-                            style: const TextStyle(
-                                fontWeight: FontWeight.w900,
-                                color: AppTheme.goldLight)),
-                      ),
-                    ],
-                  ),
+                if (_match.currentBatter.isNotEmpty)
+                  Text('Batting: ${_match.currentBatter}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 13)),
+                if (_match.currentBowler.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text('Bowling: ${_match.currentBowler}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontSize: 13, color: AppTheme.textSecondary)),
                 ],
+              ],
+              // Last ball keeps its own guard (it is real data even
+              // when no batter/bowler names arrived).
+              if (_match.isEffectivelyLive &&
+                  _match.lastBall.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Text('Last ball: ',
+                        style: TextStyle(
+                            color: AppTheme.textSecondary, fontSize: 12)),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: AppTheme.gold.withValues(alpha: 0.2),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                            color: AppTheme.gold.withValues(alpha: 0.5)),
+                      ),
+                      child: Text(_match.lastBall,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w900,
+                              color: AppTheme.goldLight)),
+                    ),
+                  ],
+                ),
               ],
               if (_match.toss.isNotEmpty) ...[
                 const Divider(color: Colors.white12, height: 24),
-                Text('🪙 ${_match.toss}',
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: AppTheme.textSecondary, fontSize: 12)),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.toll_outlined,
+                        size: 14, color: AppTheme.textSecondary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(_match.toss,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12)),
+                    ),
+                  ],
+                ),
               ],
             ],
           ),
@@ -654,9 +748,9 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _infoRow('Venue', _match.venueName),
-              _infoRow('Format', _match.format),
-              _infoRow('League', _match.league),
+              _infoRow('Venue', DisplayText.titleCase(_match.venueName)),
+              _infoRow('Format', DisplayText.formatLabel(_match.format)),
+              _infoRow('League', DisplayText.titleCase(_match.league)),
               _infoRow('Toss', _match.toss),
               if (_match.umpires.isNotEmpty)
                 _infoRow('Umpires', _match.umpires),
@@ -915,14 +1009,14 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(_match.title,
+              Text(DisplayText.titleCase(_match.title),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
-                      fontSize: 20, fontWeight: FontWeight.w900)),
+                      fontSize: 20, fontWeight: FontWeight.w800)),
               const SizedBox(height: 4),
               Text(
-                  '${_match.league} • ${_match.format} • ${_match.venueName}',
+                  '${DisplayText.titleCase(_match.league)} • ${DisplayText.formatLabel(_match.format)} • ${DisplayText.titleCase(_match.venueName)}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -937,11 +1031,21 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
               ],
               if (_match.toss.isNotEmpty) ...[
                 const SizedBox(height: 6),
-                Text('🪙 ${_match.toss}',
-                    maxLines: 3,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: AppTheme.textSecondary, fontSize: 12)),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Icon(Icons.toll_outlined,
+                        size: 14, color: AppTheme.textSecondary),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(_match.toss,
+                          maxLines: 3,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12)),
+                    ),
+                  ],
+                ),
               ],
               if (_match.umpires.isNotEmpty) ...[
                 const SizedBox(height: 4),
@@ -1547,6 +1651,22 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
             const PremiumSectionHeader(
                 title: 'Squad — tap a player for full profile',
                 icon: Icons.groups_outlined),
+            // MERGE D: honest coverage of the stats behind the
+            // squads (full archive when aggregates loaded).
+            FutureBuilder<String>(
+              future: _coverageFuture,
+              builder: (context, snap) {
+                if (!snap.hasData || snap.data!.isEmpty) {
+                  return const SizedBox.shrink();
+                }
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Text(snap.data!,
+                      style: const TextStyle(
+                          color: AppTheme.textSecondary, fontSize: 12)),
+                );
+              },
+            ),
             teamSection(_match.teamA, squadA, _match.teamB, srcA),
             teamSection(_match.teamB, squadB, _match.teamA, srcB),
             if (squadA.isEmpty && squadB.isEmpty)
@@ -1727,7 +1847,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                         '${csVenue.batFirstWinPct.toStringAsFixed(0)}%'),
                     const SizedBox(height: 8),
                     const Text(
-                        'Real • Cricsheet (2024–2026 dataset)',
+                        'Real • Cricsheet',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -1766,7 +1886,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
               padding: const EdgeInsets.only(top: 6, bottom: 10),
               child: Text(
                   csH2HMatches > 0
-                      ? 'Real • Cricsheet (2024–2026 dataset)'
+                      ? 'Real • Cricsheet'
                       : h2hTotal > 0
                           ? 'Source: ${_match.source.isNotEmpty ? _match.source : 'provider'}'
                           : lang.t('no_h2h_data'),
