@@ -254,6 +254,45 @@ class ApiService {
     }
   }
 
+  /// FINAL D — Ball-level data for visual-live widgets (ball strip,
+  /// over summaries). Order of sources, cheapest + freshest first:
+  /// 1. CricAPI live ball data — ONLY when the provider actually
+  ///    returned per-ball events (totals-only yields empty and
+  ///    falls through; the call is skipped entirely when the key
+  ///    is missing or quota is exhausted, so it never burns quota
+  ///    or flips the Home quota/demo banners).
+  /// 2. Cricsheet bundled match on the same teams + format + day —
+  ///    real deliveries, labelled 'cricsheet' with the dataset date.
+  /// 3. Empty [MatchBallData] (hasBallData false) — widgets render
+  ///    an honest no-data state, never synthesised balls. Never
+  ///    throws. Pitch / weather are NOT part of this: free
+  ///    providers supply neither, and the Venue tab keeps its
+  ///    honest "Not available from free providers yet" lines.
+  Future<MatchBallData> fetchBallData(CricketMatch match) async {
+    try {
+      for (final p in _providers) {
+        if (p is CricApiProvider &&
+            p.isConfigured &&
+            !p.quotaExhausted) {
+          final live = await p.fetchBallData(match.id);
+          if (live.hasBallData) return live;
+          break;
+        }
+      }
+    } catch (_) {}
+    try {
+      final cs = await _cricsheet();
+      return cs.ballDataForTeams(
+        match.teamA,
+        match.teamB,
+        format: match.format,
+        date: match.startTime,
+      );
+    } catch (_) {
+      return const MatchBallData.empty();
+    }
+  }
+
   /// Cricsheet cross-squad bowler-vs-batter matchups for two
   /// resolved squads (bowler in one squad, batter in the other).
   Future<List<Matchup>> cricsheetCrossMatchups(
