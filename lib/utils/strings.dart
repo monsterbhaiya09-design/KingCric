@@ -179,8 +179,10 @@ class Strings {
     },
 
     'mock_mode': {
-      'en': 'Demo data — add a free API key to go live',
-      'hi': 'डेमो डेटा — लाइव के लिए फ्री API key डालें'
+      'en': 'Live scores feed: Demo data — add a free API key to go '
+          'live. Player career history is still real Cricsheet data.',
+      'hi': 'लाइव स्कोर फ़ीड: डेमो डेटा — लाइव के लिए फ्री API key '
+          'डालें। खिलाड़ियों का करियर इतिहास असली Cricsheet डेटा है।'
     },
   };
 }
