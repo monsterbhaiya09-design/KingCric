@@ -4,11 +4,14 @@
 > Console until all 20 items are GO. This checklist is the release gate;
 > `PLAYSTORE-RELEASE.md` is the detail behind it.
 >
-> Current build state (2026-10-18, Squad H audit): version `1.0.0+2`
-> (versionCode **2**), debug-signed sideload APKs only, **no AAB yet**,
-> **no release keystore**, privacy-policy URL TODO, support email TODO,
-> $25 Google developer fee not yet paid. Nothing below is GO until it is
-> verified on the **exact build that ships**, not on an earlier APK.
+> Current build state (2026-10-24, Final R): version `1.0.0+3`
+> (versionCode **3**), AAB job implemented (`.github/workflows/build-aab.yml`,
+> not yet run on a runner — a green AAB run is still required before any
+> gate 12 GO), **no release keystore**, privacy-policy page file ready
+> (`docs/privacy-policy.html`, hosting via Pages still TODO), support
+> email TODO, $25 Google developer fee not yet paid. Nothing below is GO
+> until it is verified on the **exact build that ships**, not on an
+> earlier APK.
 
 ## How to use this checklist
 
@@ -92,7 +95,7 @@
   targetSdk 36, and 2 permissions only. The AAB's sha256 is recorded.
 - [ ] **13. versionCode bumped — GO / NO-GO.**
   versionCode is **greater than every previously submitted versionCode**
-  (current: 2). Play rejects a re-upload with the same versionCode.
+  (current: 3, after the 1.0.0+2 → 1.0.0+3 bump). Play rejects a re-upload with the same versionCode.
   `pubspec.yaml` version and `aapt2 dump badging` agree.
 - [ ] **14. Installed icon + launch — GO / NO-GO.**
   The release-signed build installed on the real phone shows the
@@ -102,10 +105,12 @@
 ### Listing + policy (Play Console)
 
 - [ ] **15. Privacy-policy URL live — GO / NO-GO.**
-  `PRIVACY-POLICY.md` is published at a stable public URL, and that URL
-  is pasted into Play Console → Policy → Privacy policy. The URL loads
-  in a browser with no sign-in. Support email in the policy is a real,
-  monitored inbox.
+  `docs/privacy-policy.html` is published at a stable public URL (GitHub
+  Pages from `/docs` — see `FINAL-RELEASE.md`), and that URL is pasted
+  into Play Console → Policy → Privacy policy. The URL loads in a
+  browser with no sign-in. Support email in the policy is a real,
+  monitored inbox. (Page file exists; hosting is still TODO until Pages
+  is enabled.)
 - [ ] **16. Screenshots from the release build — GO / NO-GO.**
   At least 5 phone screenshots (Home–Live, Scorecard, Player Profile,
   Compare, Stats/Leagues) captured from the **release-signed** build on
@@ -143,7 +148,7 @@
 | Field | Value |
 |---|---|
 | Commit SHA shipped | `[TODO]` |
-| versionCode / versionName | `[TODO]` (must be > 2) |
+| versionCode / versionName | `[TODO]` (must be > 3) |
 | AAB sha256 | `[TODO]` |
 | AAB size (bytes) | `[TODO]` |
 | Tested on | Realme GT 6T, Android 14, `[TODO: date]` |
@@ -154,11 +159,16 @@
 
 ## Known gaps that block a GO (do not hide these)
 
-- Release keystore: **not created** (see `PLAYSTORE-RELEASE.md` §9a).
-- AAB build job: **not implemented** — current workflow builds APK only
-  (see Workflow audit in `PLAYSTORE-RELEASE.md` §12).
-- Privacy-policy URL: **TODO** — policy text exists (`PRIVACY-POLICY.md`),
-  hosting does not.
+- Release keystore: **not created** (see `PLAYSTORE-RELEASE.md` §9a and
+  `FINAL-RELEASE.md` — user-side item 2).
+- AAB build job: **implemented** (`.github/workflows/build-aab.yml`,
+  release signing via secrets + bundletool verification + release-signer
+  guard) but **not yet run on a runner** — first green run is required
+  before gate 12 can be GO. Release signing is wired by a CI-time patch
+  (see the workflow header); the repo's `build.gradle.kts` still uses
+  the debug signing config and must not be mistaken for release-signed.
+- Privacy-policy URL: **TODO** — page file exists
+  (`docs/privacy-policy.html`), hosting via GitHub Pages does not.
 - Support email: **TODO** — must be a real monitored inbox.
 - $25 Google developer fee: **not yet paid** (unavoidable, charged by Google).
 - Full Hindi parity for deep content: **not verified** — do not claim it
