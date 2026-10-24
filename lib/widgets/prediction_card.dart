@@ -34,8 +34,11 @@ class PredictionCard extends StatelessWidget {
   Widget build(BuildContext context) {
     // No-signal guard: when the engine found no career / form /
     // matchup signal at all, a numeric score would be a fake number.
+    // A NaN/Inf score is the same failure even if hasData is true.
     // Show the honest empty state instead of a ~50 donut.
-    if (!prediction.hasData) {
+    if (!prediction.hasData ||
+        prediction.score.isNaN ||
+        prediction.score.isInfinite) {
       return Container(
         margin: const EdgeInsets.only(bottom: 10),
         decoration: AppTheme.premiumCard(),
