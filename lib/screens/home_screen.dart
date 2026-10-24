@@ -6,6 +6,7 @@ import '../utils/app_theme.dart';
 import '../utils/strings.dart';
 import '../utils/constants.dart';
 import '../widgets/language_toggle.dart';
+import '../widgets/empty_state.dart';
 import '../widgets/match_card.dart';
 import '../widgets/premium_widgets.dart';
 import 'match_detail_screen.dart';
@@ -336,6 +337,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 onPressed: () => _load(force: true),
                 icon: const Icon(Icons.refresh, size: 16),
                 label: Text(lang.t('refresh')),
+                // Final P: 48dp tap target for the manual refresh.
+                style: TextButton.styleFrom(
+                    minimumSize: const Size(0, 48)),
               ),
             ],
           ),
@@ -379,16 +383,33 @@ class _HomeScreenState extends State<HomeScreen> {
           // (a) text query with no hit, (b) Live empty → next match
           // below, (c) Upcoming/Finished genuinely empty.
           if (!_loading && _visible.isEmpty) ...[
-            Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(
-                  _query.isNotEmpty
-                      ? "${lang.t('no_matches_found')} '$_query'"
-                      : _filter == 'live'
-                          ? lang.t('no_live_matches')
-                          : lang.t('no_matches_section'),
-                  textAlign: TextAlign.center),
-            ),
+            // Final P: designed EmptyState replaces the plain-text
+            // line. Same three honest cases, same messages — one
+            // icon + one line + ONE action, never fake data.
+            if (_query.isNotEmpty)
+              EmptyState(
+                icon: Icons.search_off,
+                message: "${lang.t('no_matches_found')} '$_query'",
+                // No 'clear_search' string key exists (strings.dart
+                // is out of scope), so mirror the search field's own
+                // inline Clear wording instead of a missing key.
+                actionLabel: lang.isHindi ? 'साफ़ करें' : 'Clear',
+                onAction: () {
+                  _searchController.clear();
+                  setState(() => _query = '');
+                },
+              )
+            else
+              EmptyState(
+                icon: _filter == 'live'
+                    ? Icons.sports_cricket
+                    : Icons.event_busy,
+                message: _filter == 'live'
+                    ? lang.t('no_live_matches')
+                    : lang.t('no_matches_section'),
+                actionLabel: lang.t('refresh'),
+                onAction: () => _load(force: true),
+              ),
             if (_filter == 'live' && _query.isEmpty)
               ...(() {
                 final next = _nextUpcoming;
