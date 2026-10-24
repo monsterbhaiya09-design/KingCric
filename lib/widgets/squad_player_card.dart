@@ -35,11 +35,14 @@ class SquadPlayerCard extends StatelessWidget {
   bool get _isScorecardOnly => player.source == 'scorecard';
 
   /// Format batting, falling back to overall when the player has
-  /// no recorded stats in this format.
-  BattingStats _formatBatting() {
+  /// no recorded stats in this format. Returns whether the
+  /// in-format block itself was used (for an honest label).
+  ({BattingStats stats, bool inFormat}) _formatBatting() {
     final inFormat = player.battingInFormat(format);
-    if (inFormat.matches > 0 || inFormat.runs > 0) return inFormat;
-    return player.battingOverall();
+    if (inFormat.matches > 0 || inFormat.runs > 0) {
+      return (stats: inFormat, inFormat: true);
+    }
+    return (stats: player.battingOverall(), inFormat: false);
   }
 
   /// Format bowling, falling back to overall bowling when the
@@ -65,6 +68,13 @@ class SquadPlayerCard extends StatelessWidget {
     return null;
   }
 
+  /// True when the in-format bowling block itself is used.
+  bool _bowlingInFormat() {
+    final inFormat = player.bowlingByFormat[format];
+    return inFormat != null &&
+        (inFormat.wickets > 0 || inFormat.balls > 0);
+  }
+
   String _sourceLabel() {
     if (_isScorecardOnly) return 'Scorecard only';
     if (player.source == 'cricsheet') return 'Real • Cricsheet';
@@ -76,9 +86,12 @@ class SquadPlayerCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bat = _formatBatting();
+    final batRec = _formatBatting();
+    final bat = batRec.stats;
+    final batLabel = batRec.inFormat ? format : 'overall';
     final vs = player.battingVs(opponent);
     final bowl = _formatBowling();
+    final bowlLabel = _bowlingInFormat() ? format : 'overall';
     final hasAnyStats = bat.matches > 0 ||
         bat.runs > 0 ||
         player.recentForm.isNotEmpty ||
@@ -109,11 +122,21 @@ class SquadPlayerCard extends StatelessWidget {
                             style: const TextStyle(
                                 fontWeight: FontWeight.w900, fontSize: 16)),
                         const SizedBox(height: 2),
-                        Text('${player.role} • ${player.team}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                color: AppTheme.textSecondary, fontSize: 12)),
+                        // Identity: only non-empty parts, joined —
+                        // never a dangling " • " when role/team is
+                        // missing.
+                        Builder(builder: (_) {
+                          final parts = [player.role, player.team]
+                              .where((s) => s.trim().isNotEmpty)
+                              .toList();
+                          if (parts.isEmpty) return const SizedBox.shrink();
+                          return Text(parts.join(' • '),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: AppTheme.textSecondary,
+                                  fontSize: 12));
+                        }),
                       ],
                     ),
                   ),
@@ -127,9 +150,12 @@ class SquadPlayerCard extends StatelessWidget {
                     style: TextStyle(
                         color: AppTheme.textSecondary, fontSize: 13)),
               if (hasAnyStats) ...[
-                // Batting in THIS format.
+                // Batting in THIS format (or overall when the
+                // player has no stats in this format — labelled
+                // honestly). Rates over zero matches are '—',
+                // never a fake "0.0".
                 Text(
-                  'Batting ($format): ${bat.runs} runs • Avg ${bat.average.toStringAsFixed(1)} • SR ${bat.strikeRate.toStringAsFixed(1)}',
+                  'Batting ($batLabel): ${bat.runs} runs • Avg ${bat.matches > 0 ? bat.average.toStringAsFixed(1) : '—'} • SR ${bat.matches > 0 ? bat.strikeRate.toStringAsFixed(1) : '—'}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -154,7 +180,7 @@ class SquadPlayerCard extends StatelessWidget {
                 if (bowl != null) ...[
                   const SizedBox(height: 4),
                   Text(
-                    'Bowling ($format): ${bowl.wickets} wkts${bowl.economy > 0 ? ' • Econ ${bowl.economy.toStringAsFixed(2)}' : ''}',
+                    'Bowling ($bowlLabel): ${bowl.wickets} wkts${bowl.economy > 0 ? ' • Econ ${bowl.economy.toStringAsFixed(2)}' : ''}',
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
