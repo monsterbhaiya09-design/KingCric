@@ -50,6 +50,10 @@ class CricsheetDelivery {
   final int noBalls;
   final int byes;
   final int legByes;
+  /// Over number within the innings (0-based), taken from the raw
+  /// over object. -1 when the source did not carry one — grouping
+  /// must never invent over boundaries from ball counts alone.
+  final int overNumber;
   final String actualDelivery;
   final String? wicketKind;
   final String? playerOut;
@@ -70,6 +74,7 @@ class CricsheetDelivery {
     required this.noBalls,
     required this.byes,
     required this.legByes,
+    this.overNumber = -1,
     required this.actualDelivery,
     this.wicketKind,
     this.playerOut,
@@ -270,6 +275,7 @@ class CricsheetService {
                 noBalls: _int(extras['noballs']),
                 byes: _int(extras['byes']),
                 legByes: _int(extras['legbyes']),
+                overNumber: (over['over'] as num?)?.toInt() ?? -1,
                 actualDelivery: '${d['actual_delivery'] ?? ''}',
                 wicketKind: kind,
                 playerOut: out,
@@ -1131,6 +1137,54 @@ class CricsheetService {
     return minLen > 0 && inter / minLen >= 0.75;
   }
 
+  /// Ball-level data for ONE bundled match between [teamA] and
+  /// [teamB], for visual-live widgets (ball-outcome strip, over
+  /// summaries). Everything is DERIVED from the bundled match's
+  /// real deliveries — grouping by the source over number, never
+  /// reconstructed from totals, and never synthesised.
+  ///
+  /// Matching is strict so a widget can never show another
+  /// match's balls as this match's: with [date] given, only a
+  /// bundled match on the same UTC calendar day qualifies, and if
+  /// MORE than one qualifies (e.g. a men+women double-header) the
+  /// result is EMPTY — ambiguous beats wrong. Without [date], the
+  /// latest meeting is used and labelled with its date. No match
+  /// -> empty [MatchBallData] with [MatchBallData.hasBallData]
+  /// false; callers render an honest no-data state, never a strip
+  /// of invented balls. [format] uses the same normalisation as
+  /// [teamH2H] (IT20 -> T20, ODM -> ODI).
+  MatchBallData ballDataForTeams(String teamA, String teamB,
+      {String? format, DateTime? date}) {
+    const empty = MatchBallData.empty(source: 'cricsheet');
+    final fmt = format == null ? null : normalizeFormat(format);
+    final candidates = matches.where((m) {
+      if (fmt != null && m.format != fmt) return false;
+      return m.teams.any((t) => _sameTeam(t, teamA)) &&
+          m.teams.any((t) => _sameTeam(t, teamB));
+    }).toList();
+    if (candidates.isEmpty) return empty;
+    CricsheetMatch? picked;
+    if (date != null) {
+      final d = date.toUtc();
+      final day =
+          '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+      final onDay = candidates.where((m) => m.date == day).toList();
+      if (onDay.length != 1) return empty;
+      picked = onDay.single;
+    } else {
+      candidates.sort((a, b) => b.date.compareTo(a.date));
+      picked = candidates.first;
+    }
+    return MatchBallData.fromDeliveries(
+      teamA: teamA,
+      teamB: teamB,
+      format: picked.format,
+      matchDate: picked.date,
+      source: 'cricsheet',
+      deliveries: picked.deliveries,
+    );
+  }
+
   /// Cross-squad bowler-vs-batter matchups from Cricsheet:
   /// bowler in one squad, batter in the other only (same-team
   /// pairs are not head-to-head). Sorted dismissals desc, then
@@ -1317,4 +1371,178 @@ class _PairAgg {
   int runs = 0;
   int dismissals = 0;
   final Set<int> matches = {};
+}
+
+/// FINAL D — Ball-level data for visual-live widgets. These types
+/// carry ONLY what a source actually supplied: a ball outcome per
+/// real delivery, grouped into over summaries by the source over
+/// number. Nothing here is ever synthesised from totals — a
+/// totals-only payload yields an empty [MatchBallData] with
+/// [MatchBallData.hasBallData] false, and widgets must render an
+/// honest no-data state for it.
+///
+/// Display [BallOutcome.label]: 'W' when a wicket fell, 'Wd' for a
+/// wide, 'Nb' for a no-ball, otherwise the runs digit. The label is
+/// a display derivation from the delivery's own fields, not new
+/// data: wides/no-balls that also conceded runs still show 'Wd' /
+/// 'Nb' (the run count stays in [BallOutcome.runs]).
+class BallOutcome {
+  final int inningsIndex;
+  final int overNumber;
+  final int ballIndex;
+
+  /// 1-based position of this delivery within its over, counting
+  /// every delivery (wides / no-balls included) in source order.
+  final String batter;
+  final String bowler;
+  final int runs;
+  final int batterRuns;
+  final bool isWide;
+  final bool isNoBall;
+  final bool isWicket;
+  final String? wicketKind;
+  final String? playerOut;
+
+  const BallOutcome({
+    required this.inningsIndex,
+    required this.overNumber,
+    required this.ballIndex,
+    required this.batter,
+    required this.bowler,
+    required this.runs,
+    required this.batterRuns,
+    this.isWide = false,
+    this.isNoBall = false,
+    this.isWicket = false,
+    this.wicketKind,
+    this.playerOut,
+  });
+
+  bool get isLegalBall => !isWide && !isNoBall;
+
+  String get label {
+    if (isWicket) return 'W';
+    if (isWide) return 'Wd';
+    if (isNoBall) return 'Nb';
+    return '$runs';
+  }
+}
+
+/// One over's worth of real deliveries, in source order.
+class OverSummary {
+  final int inningsIndex;
+  final int overNumber;
+  final String battingTeam;
+  final String bowler;
+  final List<BallOutcome> balls;
+
+  const OverSummary({
+    required this.inningsIndex,
+    required this.overNumber,
+    required this.battingTeam,
+    required this.bowler,
+    required this.balls,
+  });
+
+  int get runs => balls.fold(0, (acc, b) => acc + b.runs);
+  int get wickets => balls.where((b) => b.isWicket).length;
+  int get legalBalls => balls.where((b) => b.isLegalBall).length;
+}
+
+/// Ball-level data for one match, from one named source.
+/// [hasBallData] is false for totals-only payloads — widgets must
+/// treat that as "no ball strip", never as an empty innings.
+class MatchBallData {
+  final String teamA;
+  final String teamB;
+  final String format;
+  final String matchDate;
+  final String source;
+  final List<OverSummary> overs;
+
+  const MatchBallData({
+    this.teamA = '',
+    this.teamB = '',
+    this.format = '',
+    this.matchDate = '',
+    this.source = '',
+    this.overs = const [],
+  });
+
+  const MatchBallData.empty({this.source = ''})
+      : teamA = '',
+        teamB = '',
+        format = '',
+        matchDate = '',
+        overs = const [];
+
+  bool get hasBallData => overs.any((o) => o.balls.isNotEmpty);
+
+  List<BallOutcome> get balls =>
+      overs.expand((o) => o.balls).toList(growable: false);
+
+  List<OverSummary> oversForInnings(int inningsIndex) =>
+      overs.where((o) => o.inningsIndex == inningsIndex).toList();
+
+  /// Build from Cricsheet deliveries: group by (innings, source
+  /// over number) in first-seen order. Deliveries with an unknown
+  /// over number (-1) stay together in one bucket rather than
+  /// being split by invented boundaries.
+  factory MatchBallData.fromDeliveries({
+    required String teamA,
+    required String teamB,
+    required String format,
+    required String matchDate,
+    required String source,
+    required List<CricsheetDelivery> deliveries,
+  }) {
+    final grouped = <String, List<CricsheetDelivery>>{};
+    final order = <String>[];
+    for (final d in deliveries) {
+      final key = '${d.inningsIndex}|${d.overNumber}';
+      if (!grouped.containsKey(key)) {
+        grouped[key] = [];
+        order.add(key);
+      }
+      grouped[key]!.add(d);
+    }
+    final overs = <OverSummary>[];
+    for (final key in order) {
+      final ds = grouped[key]!;
+      final first = ds.first;
+      final balls = <BallOutcome>[];
+      for (var i = 0; i < ds.length; i++) {
+        final d = ds[i];
+        balls.add(BallOutcome(
+          inningsIndex: d.inningsIndex,
+          overNumber: d.overNumber,
+          ballIndex: i + 1,
+          batter: d.batter,
+          bowler: d.bowler,
+          runs: d.totalRuns,
+          batterRuns: d.batterRuns,
+          isWide: d.isWide,
+          isNoBall: d.isNoBall,
+          isWicket: d.isWicket,
+          wicketKind: d.wicketKind,
+          playerOut: d.playerOut,
+        ));
+      }
+      overs.add(OverSummary(
+        inningsIndex: first.inningsIndex,
+        overNumber: first.overNumber,
+        battingTeam: first.battingTeam,
+        bowler: first.bowler,
+        balls: balls,
+      ));
+    }
+    return MatchBallData(
+      teamA: teamA,
+      teamB: teamB,
+      format: format,
+      matchDate: matchDate,
+      source: source,
+      overs: overs,
+    );
+  }
 }
