@@ -33,21 +33,23 @@ class EmptyState extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Container(
-            width: 64,
-            height: 64,
+            width: 60,
+            height: 60,
             alignment: Alignment.center,
             decoration: BoxDecoration(
-              gradient: AppTheme.goldGradient,
+              color: AppTheme.navyCard2,
               shape: BoxShape.circle,
+              border: Border.all(
+                  color: AppTheme.gold.withValues(alpha: 0.40), width: 1),
               boxShadow: [
                 BoxShadow(
-                  color: AppTheme.gold.withValues(alpha: 0.35),
-                  blurRadius: 16,
-                  offset: const Offset(0, 6),
+                  color: Colors.black.withValues(alpha: 0.25),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
                 ),
               ],
             ),
-            child: Icon(icon, size: 30, color: Colors.black),
+            child: Icon(icon, size: 28, color: AppTheme.goldLight),
           ),
           const SizedBox(height: 16),
           Text(
