@@ -5,7 +5,7 @@ publish_to: "none"
 # same debug cert + a stale partial install makes Android reject reinstall
 # as INSTALL_FAILED_UPDATE_INCOMPATIBLE -> generic "App not installed",
 # even when the new APK is valid. New APK must be versionCode 2.
-version: 1.0.0+3
+version: 1.0.0+4
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
@@ -50,3 +50,6 @@ flutter:
     # player stats offline. Full dataset = all_json.zip download
     # (see CRICSHEET-DATA.md). Never scrape Cricbuzz/Cricinfo.
     - assets/cricsheet_sample.json
+    # Squad D full-archive aggregates (tools/aggregate_cricsheet.py):
+    # compact per-player totals, 2001-2026, 9,943 internationals.
+    - assets/cricsheet_stats.json
