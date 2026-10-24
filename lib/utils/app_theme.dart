@@ -72,8 +72,28 @@ class AppTheme {
     );
   }
 
-  static BoxDecoration heroCard() {
+  /// Gold filled button (Final P): gold background, black label —
+  /// readable on navy, used by EmptyState's single action.
+  static ButtonStyle get goldFilledButton => FilledButton.styleFrom(
+        backgroundColor: gold,
+        foregroundColor: Colors.black,
+        textStyle: const TextStyle(
+            fontSize: 14, fontWeight: FontWeight.w800),
+        shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(24)),
+        minimumSize: const Size(0, 48),
+      );
+
+  /// Designed empty-state card: navy gradient + soft gold border.
+  static BoxDecoration emptyStateDecoration() {
     return BoxDecoration(
+      gradient: cardGradient,
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: gold.withValues(alpha: 0.35), width: 1),
+    );
+  }
+
+  static BoxDecoration heroCard() {    return BoxDecoration(
       gradient: const LinearGradient(
         colors: [Color(0xFF2A1E4A), Color(0xFF151B38), Color(0xFF0B1026)],
         begin: Alignment.topLeft,
