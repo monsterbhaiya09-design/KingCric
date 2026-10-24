@@ -6,6 +6,7 @@ import '../../models/match.dart';
 import '../../models/player.dart';
 import '../../utils/constants.dart';
 import 'cricket_provider.dart';
+import '../cricsheet_service.dart';
 
 /// PRIMARY provider: CricAPI / CricketData.org.
 /// Base: https://api.cricapi.com/v1 — `?apikey=` query param.
@@ -252,6 +253,175 @@ class CricApiProvider implements CricketProvider {
     } catch (_) {
       return null;
     }
+  }
+
+  /// FINAL D — Ball-level data from a /cricketScore payload, ONLY
+  /// where the payload actually carries per-ball events. The
+  /// scorecard shape the provider parses (batting / bowling totals)
+  /// carries NO per-ball array, so the normal result is an empty
+  /// [MatchBallData] with [MatchBallData.hasBallData] false — that
+  /// is the honest answer for a totals-only payload, and widgets
+  /// must render no ball strip for it. If a future payload DOES
+  /// carry per-ball lists (under 'balls', 'ballByBall',
+  /// 'commentary', or 'overs' -> 'deliveries'), they are parsed
+  /// tolerantly; events without an over number are dropped rather
+  /// than placed by guesswork. Per-over runs are NEVER rebuilt
+  /// from bowling totals. Quota handling is identical to
+  /// [fetchScorecard] (one hit, _updateQuota, 429 via [_get]).
+  Future<MatchBallData> fetchBallData(String matchId) async {
+    const empty = MatchBallData.empty(source: 'CricAPI');
+    if (!isConfigured || _capped) return empty;
+    final uri = Uri.parse(
+        '${AppConstants.cricApiBaseUrl}/cricketScore?apikey=<redacted>&id=$matchId');
+    final res = await _get(uri);
+    if (res == null || res.statusCode != 200) return empty;
+    try {
+      final body = jsonDecode(res.body) as Map<String, dynamic>;
+      _updateQuota(body);
+      if (body['status'] == 'failure') return empty;
+      final data = (body['data'] as Map?)?.cast<String, dynamic>();
+      if (data == null || data.isEmpty) return empty;
+      final rawInnings = (data['scorecard'] as List?) ?? [];
+      final overs = <OverSummary>[];
+      var inningsIndex = 0;
+      for (final raw in rawInnings) {
+        final inn = (raw as Map).cast<String, dynamic>();
+        final events = <_RawBall>[];
+        for (final key in ['balls', 'ballByBall', 'commentary']) {
+          final list = inn[key] as List?;
+          if (list == null) continue;
+          for (final e in list) {
+            if (e is Map) {
+              final parsed = _parseBallEvent(e.cast());
+              if (parsed != null) events.add(parsed);
+            }
+          }
+        }
+        final oversRaw = inn['overs'] as List?;
+        if (oversRaw != null) {
+          for (final o in oversRaw) {
+            if (o is! Map) continue;
+            final dList = o['deliveries'] as List?;
+            if (dList == null) continue;
+            for (final e in dList) {
+              if (e is Map) {
+                final parsed = _parseBallEvent(e.cast());
+                if (parsed != null) events.add(parsed);
+              }
+            }
+          }
+        }
+        // Group by over number, in first-seen order; events with
+        // no over number were already dropped by _parseBallEvent.
+        final grouped = <int, List<_RawBall>>{};
+        final order = <int>[];
+        for (final e in events) {
+          if (!grouped.containsKey(e.over)) {
+            grouped[e.over] = [];
+            order.add(e.over);
+          }
+          grouped[e.over]!.add(e);
+        }
+        for (final over in order) {
+          final es = grouped[over]!;
+          final balls = <BallOutcome>[];
+          for (var i = 0; i < es.length; i++) {
+            final e = es[i];
+            balls.add(BallOutcome(
+              inningsIndex: inningsIndex,
+              overNumber: over,
+              ballIndex: e.ball ?? i + 1,
+              batter: e.batter,
+              bowler: e.bowler,
+              runs: e.runs,
+              batterRuns: e.batterRuns,
+              isWide: e.isWide,
+              isNoBall: e.isNoBall,
+              isWicket: e.isWicket,
+              wicketKind: e.wicketKind,
+              playerOut: e.playerOut,
+            ));
+          }
+          overs.add(OverSummary(
+            inningsIndex: inningsIndex,
+            overNumber: over,
+            battingTeam: '',
+            bowler: balls.isEmpty ? '' : balls.first.bowler,
+            balls: balls,
+          ));
+        }
+        inningsIndex += 1;
+      }
+      return MatchBallData(
+        source: 'CricAPI',
+        overs: overs,
+      );
+    } catch (_) {
+      return empty;
+    }
+  }
+
+  /// One parsed per-ball event, or null when the event carries no
+  /// usable over number (placement must never be guessed).
+  _RawBall? _parseBallEvent(Map<String, dynamic> m) {
+    final over = _parseOverNumber(m['over'] ?? m['overNumber']);
+    if (over == null) return null;
+    final ball = (m['ball'] as num?)?.toInt() ??
+        (m['ballNumber'] as num?)?.toInt() ??
+        (m['delivery'] as num?)?.toInt();
+    final runs = (m['runs'] as num?)?.toInt() ??
+        (m['r'] as num?)?.toInt() ??
+        (m['total'] as num?)?.toInt() ??
+        0;
+    final batterRuns = (m['batterRuns'] as num?)?.toInt() ??
+        (m['batsmanRuns'] as num?)?.toInt() ??
+        runs;
+    final extras = (m['extras'] as Map?)?.cast<String, dynamic>() ?? {};
+    final isWide = m['wide'] == true ||
+        m['isWide'] == true ||
+        (extras['wides'] as num?) != null &&
+            (extras['wides'] as num) > 0;
+    final isNoBall = m['noBall'] == true ||
+        m['isNoBall'] == true ||
+        (extras['noballs'] as num?) != null &&
+            (extras['noballs'] as num) > 0;
+    final playerOut = (m['playerOut'] as String?) ??
+        (m['player_out'] as String?) ??
+        (m['dismissedBatter'] as String?);
+    final dismissal = (m['dismissal'] as String?) ?? '';
+    final isWicket = m['wicket'] == true ||
+        m['isWicket'] == true ||
+        (playerOut != null && playerOut.isNotEmpty) ||
+        dismissal.isNotEmpty;
+    return _RawBall(
+      over: over,
+      ball: ball,
+      batter: (m['batter'] as String?) ??
+          (m['batsman'] as String?) ??
+          (m['striker'] as String?) ??
+          '',
+      bowler: (m['bowler'] as String?) ?? '',
+      runs: runs,
+      batterRuns: batterRuns,
+      isWide: isWide,
+      isNoBall: isNoBall,
+      isWicket: isWicket,
+      wicketKind: (m['wicketKind'] as String?) ??
+          (m['kind'] as String?) ??
+          (dismissal.isNotEmpty ? dismissal : null),
+      playerOut: playerOut,
+    );
+  }
+
+  /// Over numbers arrive as an int, a double, or "12.3"-style
+  /// strings. Returns the whole-over part, or null when unparseable.
+  int? _parseOverNumber(Object? v) {
+    if (v is num) return v.toInt();
+    if (v is String) {
+      final head = v.split('.').first;
+      return int.tryParse(head);
+    }
+    return null;
   }
 
   @override
@@ -854,4 +1024,35 @@ class CricApiProvider implements CricketProvider {
           extrasParts.isEmpty ? '' : '${extrasParts.join(', ')} ($extrasRuns)',
     );
   }
+}
+
+/// Parsed per-ball event before grouping into overs. Private to
+/// the provider: widgets only ever see [BallOutcome] /
+/// [OverSummary] via [MatchBallData].
+class _RawBall {
+  final int over;
+  final int? ball;
+  final String batter;
+  final String bowler;
+  final int runs;
+  final int batterRuns;
+  final bool isWide;
+  final bool isNoBall;
+  final bool isWicket;
+  final String? wicketKind;
+  final String? playerOut;
+
+  const _RawBall({
+    required this.over,
+    required this.ball,
+    required this.batter,
+    required this.bowler,
+    required this.runs,
+    required this.batterRuns,
+    required this.isWide,
+    required this.isNoBall,
+    required this.isWicket,
+    required this.wicketKind,
+    required this.playerOut,
+  });
 }
