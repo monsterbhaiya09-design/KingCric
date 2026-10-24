@@ -45,7 +45,7 @@ class H2HCard extends StatelessWidget {
                     style:
                         TextStyle(fontWeight: FontWeight.w900, fontSize: 16)),
               ),
-              GoldChip(label: '$total matches'),
+              GoldChip(label: total == 0 ? 'No matches yet' : '$total matches'),
             ],
           ),
           const SizedBox(height: 12),
@@ -59,7 +59,7 @@ class H2HCard extends StatelessWidget {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(fontWeight: FontWeight.w800)),
-                    Text('$winsA wins',
+                    Text(total == 0 ? '—' : '$winsA wins',
                         style: TextStyle(
                             color: aLeads || !bLeads
                                 ? AppTheme.goldLight
@@ -90,7 +90,7 @@ class H2HCard extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                         textAlign: TextAlign.right,
                         style: const TextStyle(fontWeight: FontWeight.w800)),
-                    Text('$winsB wins',
+                    Text(total == 0 ? '—' : '$winsB wins',
                         textAlign: TextAlign.right,
                         style: TextStyle(
                             color: bLeads || !aLeads
