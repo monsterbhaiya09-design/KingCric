@@ -152,7 +152,10 @@ class _HomeScreenState extends State<HomeScreen> {
       onRefresh: () => _load(force: true),
       // Always scrollable so pull-to-refresh works even with a
       // short list (otherwise a 1-card list can never refresh).
-      child: ListView(
+      // FIX VIS (bug 4): centered max-width column on wide
+      // screens; a no-op on phones.
+      child: CenteredContent(
+        child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
         padding: const EdgeInsets.all(14),
         children: [
@@ -294,11 +297,12 @@ class _HomeScreenState extends State<HomeScreen> {
               color: AppTheme.textMuted,
               icon: Icons.info_outline,
               semanticsLabel:
-                  'Live data unavailable, showing demo data',
+                  'Live scores feed on demo data; player history is real Cricsheet data',
               child: Text(
-                  'Live data unavailable right now — showing demo / '
-                  'last verified data. Pull to refresh later.',
-                  maxLines: 2,
+                  'Live scores feed is running on demo data right '
+                  'now — player career history is still real '
+                  'Cricsheet data. Pull to refresh later.',
+                  maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(fontSize: 12)),
             ),
@@ -322,14 +326,14 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(height: 10),
           // Freshness signal (CricketLineX / Cricbuzz pattern):
-          // "Last updated HH:MM" + manual Refresh, always visible.
+          // "Last updated + date" + manual Refresh, always visible.
           Row(
             children: [
               Expanded(
                 child: Text(
                   _lastUpdated == null
                       ? lang.t('updating')
-                      : '${lang.t('last_updated_prefix')} ${_lastUpdated!.hour.toString().padLeft(2, '0')}:${_lastUpdated!.minute.toString().padLeft(2, '0')}',
+                      : '${lang.t('last_updated_prefix')} ${DisplayText.lastUpdatedLabel(_lastUpdated!)}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -457,6 +461,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     color: AppTheme.textSecondary, fontSize: 12)),
           ),
         ],
+        ),
       ),
     );
   }
