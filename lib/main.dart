@@ -7,6 +7,7 @@ import 'screens/favourites_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/leagues_screen.dart';
 import 'screens/stats_screen.dart';
+import 'services/api_service.dart';
 import 'services/auto_update_service.dart';
 import 'utils/app_theme.dart';
 import 'utils/strings.dart';
@@ -42,6 +43,10 @@ void main() {
                 // Never let the background poller crash startup:
                 // start() is fully guarded inside the service.
                 svc.start();
+                // MERGE D: finished match -> delta increments on
+                // top of the bundled aggregates, persisted.
+                svc.addFinishedListener(
+                    (m) => ApiService().applyFinishedMatchDelta(m));
                 return svc;
               },
               dispose: (_, s) => s.dispose(),
