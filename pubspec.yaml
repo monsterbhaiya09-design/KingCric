@@ -5,7 +5,7 @@ publish_to: "none"
 # same debug cert + a stale partial install makes Android reject reinstall
 # as INSTALL_FAILED_UPDATE_INCOMPATIBLE -> generic "App not installed",
 # even when the new APK is valid. New APK must be versionCode 2.
-version: 1.0.0+2
+version: 1.0.0+3
 
 environment:
   sdk: ">=3.0.0 <4.0.0"
