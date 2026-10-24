@@ -2,6 +2,52 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../utils/app_theme.dart';
 
+/// Display-text rules (FIX UX): provider data arrives in mixed case
+/// ("odi", "t20", "bulgaria women") and raw codes must never reach
+/// the screen. ONE place owns the mapping so every screen agrees:
+/// format codes render as ODI / T20 / Test / T10, names render in
+/// Title Case without ever corrupting acronyms or mixed-case names.
+class DisplayText {
+  static const _formats = {
+    'test': 'Test',
+    'odi': 'ODI',
+    't20': 'T20',
+    't20i': 'T20I',
+    't10': 'T10',
+    'the hundred': 'The Hundred',
+    'hundred': 'The Hundred',
+    'first class': 'First Class',
+    'first-class': 'First Class',
+    'list a': 'List A',
+  };
+
+  /// Format code -> display label. Unknown codes fall back to
+  /// Title Case (never raw lowercase).
+  static String formatLabel(String input) {
+    final key = input.trim().toLowerCase();
+    if (key.isEmpty) return input;
+    return _formats[key] ?? titleCase(input);
+  }
+
+  /// Safe Title Case: only words that are uniformly cased AND long
+  /// enough to be real words change ("bulgaria women" ->
+  /// "Bulgaria Women"). Short acronyms ("IPL", "ODI") and
+  /// mixed-case proper names ("McCullum", "de Kock") are left
+  /// untouched, so title-casing can never corrupt a real name.
+  static String titleCase(String input) {
+    return input.split(' ').map((word) {
+      return word.split('-').map((part) {
+        final hasLetter = part.contains(RegExp(r'[A-Za-z]'));
+        if (!hasLetter || part.length < 4) return part;
+        final upper = part == part.toUpperCase();
+        final lower = part == part.toLowerCase();
+        if (!upper && !lower) return part;
+        return part[0].toUpperCase() + part.substring(1).toLowerCase();
+      }).join('-');
+    }).join(' ');
+  }
+}
+
 /// V2 premium shared widgets: gradient cards, live pulse, stat bars,
 /// section headers. No new dependencies — pure Flutter.
 
@@ -170,7 +216,9 @@ class StatBar extends StatelessWidget {
   }
 }
 
-/// Premium section header with gold rule.
+/// Premium section header — clean modern style (FIX UX): smaller
+/// title, Material icon only (no emoji headers anywhere), and a
+/// short thin gold accent bar instead of a heavy gold rule.
 class PremiumSectionHeader extends StatelessWidget {
   final String title;
   final String? subtitle;
@@ -184,14 +232,14 @@ class PremiumSectionHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(top: 18, bottom: 10),
+      padding: const EdgeInsets.only(top: 14, bottom: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
               if (icon != null) ...[
-                Icon(icon, size: 20, color: AppTheme.goldLight),
+                Icon(icon, size: 18, color: AppTheme.goldLight),
                 const SizedBox(width: 8),
               ],
               Expanded(
@@ -199,8 +247,8 @@ class PremiumSectionHeader extends StatelessWidget {
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w900,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
                         letterSpacing: 0.2)),
               ),
             ],
@@ -213,10 +261,10 @@ class PremiumSectionHeader extends StatelessWidget {
                 style: const TextStyle(
                     color: AppTheme.textSecondary, fontSize: 12)),
           ],
-          const SizedBox(height: 8),
+          const SizedBox(height: 6),
           Container(
             height: 2,
-            width: 64,
+            width: 40,
             decoration: BoxDecoration(
               gradient: AppTheme.goldGradient,
               borderRadius: BorderRadius.circular(2),
@@ -228,7 +276,9 @@ class PremiumSectionHeader extends StatelessWidget {
   }
 }
 
-/// Gradient avatar with initials — King gold ring.
+/// Gradient avatar with initials — thin gold ring (FIX UX): the
+/// old thick gradient + heavy glow read as cartoon; a 1.5px ring
+/// with a soft shadow keeps the King identity without the bulk.
 class KingAvatar extends StatelessWidget {
   final String name;
   final double radius;
@@ -248,30 +298,25 @@ class KingAvatar extends StatelessWidget {
       height: radius * 2,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: AppTheme.goldGradient,
+        color: AppTheme.navyCard2,
+        border: Border.all(
+            color: AppTheme.gold.withValues(alpha: 0.55), width: 1.5),
         boxShadow: [
           BoxShadow(
-            color: AppTheme.gold.withValues(alpha: 0.45),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
+            color: Colors.black.withValues(alpha: 0.25),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
-      padding: const EdgeInsets.all(2.5),
-      child: Container(
-        decoration: const BoxDecoration(
-          shape: BoxShape.circle,
-          color: AppTheme.navyCard2,
-        ),
-        alignment: Alignment.center,
-        child: Text(initials,
-            maxLines: 1,
-            overflow: TextOverflow.clip,
-            style: TextStyle(
-                color: AppTheme.goldLight,
-                fontSize: radius * 0.62,
-                fontWeight: FontWeight.w900)),
-      ),
+      alignment: Alignment.center,
+      child: Text(initials,
+          maxLines: 1,
+          overflow: TextOverflow.clip,
+          style: TextStyle(
+              color: AppTheme.goldLight,
+              fontSize: radius * 0.62,
+              fontWeight: FontWeight.w900)),
     );
   }
 }
@@ -286,9 +331,9 @@ class GoldChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
       decoration: BoxDecoration(
-        color: AppTheme.gold.withValues(alpha: 0.16),
+        color: AppTheme.gold.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: AppTheme.gold.withValues(alpha: 0.5)),
+        border: Border.all(color: AppTheme.gold.withValues(alpha: 0.28)),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
