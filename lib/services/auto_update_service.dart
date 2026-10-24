@@ -20,6 +20,11 @@ import 'completeness_validator.dart';
 /// demo mode, free API in live mode). A production build would run the
 /// same logic in a background isolate / WorkManager + Firebase
 /// Function so updates arrive even when the app is closed.
+/// MANUAL pre-match refresh (Squad D, user rule): there is NO
+/// automatic pre-match refresh in this app — no timer, no
+/// refresh-on-resume for this feature. The UI shows a BUTTON; only
+/// when the user presses it does [AutoUpdateService.refreshMatchData]
+/// run. Not calling it leaves every cache exactly as before.
 class AutoUpdateService {
   final ApiService _api;
   Timer? _timer;
@@ -163,8 +168,104 @@ class AutoUpdateService {
     }
   }
 
+  /// MANUAL refresh of one match's data (button-pressed only).
+  ///
+  /// What it does, in order:
+  /// 1. Force-refreshes the match detail via ApiService, BYPASSING
+  ///    the cache (forceRefresh: true) — this is the only way fresh
+  ///    pre-match data (toss, venue, status, provider squads when
+  ///    the provider supplies them) enters the app for this match.
+  /// 2. Recomputes ("warms") the match's squad / H2H / venue
+  ///    aggregates from base + delta through ApiService, so opening
+  ///    the match afterwards shows fresh squads/stats immediately.
+  ///
+  /// What it does NOT do: it never runs on a timer, never runs on
+  /// resume, never fires finish listeners, and never counts
+  /// anything twice — detail caching is an overwrite and squad
+  /// aggregates are pure functions of base + delta, so pressing
+  /// twice yields byte-identical data, not doubled totals. Delta
+  /// application for finished matches stays on the finish-event
+  /// path (dedupe by match id there); this method only refreshes
+  /// and warms.
+  ///
+  /// Honest failure reasons (never fake data): quota exhausted ->
+  /// old data kept, no call burned; provider returns nothing
+  /// (offline, or the provider has no scorecard for this match yet)
+  /// -> old data kept. Provider pre-match supply, honestly: free
+  /// providers expose teams / venue / toss / status; the OFFICIAL
+  /// XI is only exposed at/after toss when the provider carries it
+  /// — when it does not, squads stay archive-based and labelled by
+  /// source (see CricsheetService). An XI is never invented.
+  Future<ManualRefreshResult> refreshMatchData(
+      CricketMatch match) async {
+    try {
+      if (_api.quotaState == QuotaState.quotaExhausted) {
+        return ManualRefreshResult.failure(
+            ManualRefreshReason.quotaExhausted);
+      }
+      final detail =
+          await _api.fetchMatchDetail(match.id, forceRefresh: true);
+      if (detail == null) {
+        if (_api.quotaState == QuotaState.quotaExhausted) {
+          return ManualRefreshResult.failure(
+              ManualRefreshReason.quotaExhausted);
+        }
+        return ManualRefreshResult.failure(ManualRefreshReason.noData);
+      }
+      // Warm aggregates from base + delta (best-effort each).
+      try {
+        await _api.cricsheetSquadsFor(detail.teamA, detail.teamB);
+      } catch (_) {}
+      try {
+        await _api.cricsheetHeadToHead(detail.teamA, detail.teamB);
+      } catch (_) {}
+      try {
+        if (detail.venueName.isNotEmpty) {
+          await _api.cricsheetVenueStats(detail.venueName);
+        }
+      } catch (_) {}
+      return ManualRefreshResult.success(detail);
+    } catch (_) {
+      return ManualRefreshResult.failure(ManualRefreshReason.noData);
+    }
+  }
+
   /// How long ago the service last polled (for "Last updated" UI).
   DateTime lastPoll = DateTime.now();
 
   void dispose() => stop();
+}
+
+/// Result of [AutoUpdateService.refreshMatchData].
+enum ManualRefreshReason {
+  none,
+  quotaExhausted,
+  noData,
+}
+
+class ManualRefreshResult {
+  final bool success;
+  final CricketMatch? detail;
+  final ManualRefreshReason reason;
+
+  const ManualRefreshResult._(this.success, this.detail, this.reason);
+
+  factory ManualRefreshResult.success(CricketMatch detail) =>
+      ManualRefreshResult._(true, detail, ManualRefreshReason.none);
+
+  factory ManualRefreshResult.failure(ManualRefreshReason reason) =>
+      ManualRefreshResult._(false, null, reason);
+
+  /// Human-readable reason for UI. Success has no reason text.
+  String get message {
+    switch (reason) {
+      case ManualRefreshReason.quotaExhausted:
+        return 'Daily API quota exhausted — old data kept.';
+      case ManualRefreshReason.noData:
+        return 'No data from provider (offline, or provider has no '
+            'scorecard for this match yet) — old data kept.';
+      case ManualRefreshReason.none:
+        return '';
+    }
+  }
 }
