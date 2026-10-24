@@ -35,7 +35,10 @@ class PlayerProfileScreen extends StatelessWidget {
       appBar: AppBar(
           title: Text(player.name,
               maxLines: 1, overflow: TextOverflow.ellipsis)),
-      body: ListView(
+      // FIX VIS (bug 4): centered max-width column on wide
+      // screens; a no-op on phones.
+      body: CenteredContent(
+        child: ListView(
         padding: const EdgeInsets.all(14),
         children: [
           // Premium hero
@@ -356,6 +359,7 @@ class PlayerProfileScreen extends StatelessWidget {
           }),
           const SizedBox(height: 20),
         ],
+        ),
       ),
     );
   }
@@ -480,15 +484,24 @@ class PlayerProfileScreen extends StatelessWidget {
     );
   }
 
+  /// FIX VIS (bug 3): bounded cell height. The old
+  /// GridView.count with childAspectRatio 1.55 sized cells from
+  /// the COLUMN width, so on wide screens each cell grew to
+  /// ~220–380px tall while its StatCard content is only ~110px —
+  /// a huge blank area under every card. A fixed mainAxisExtent
+  /// hugs the content on phone AND desktop widths alike.
   Widget _grid(List<Widget> cards) {
-    return GridView.count(
-      crossAxisCount: 2,
+    return GridView.builder(
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
-      childAspectRatio: 1.55,
-      crossAxisSpacing: 10,
-      mainAxisSpacing: 10,
-      children: cards,
+      itemCount: cards.length,
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 2,
+        mainAxisExtent: 116,
+        crossAxisSpacing: 10,
+        mainAxisSpacing: 10,
+      ),
+      itemBuilder: (_, i) => cards[i],
     );
   }
 }
