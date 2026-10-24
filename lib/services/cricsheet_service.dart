@@ -1,7 +1,9 @@
 import 'dart:convert';
 
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../models/match.dart';
 import '../models/player.dart';
 
 /// Cricsheet open-data service — REAL player stats calculated from
@@ -140,15 +142,63 @@ class _Identity {
 class CricsheetService {
   final List<CricsheetMatch> matches;
 
-  CricsheetService(this.matches);
+  /// FULL-ARCHIVE aggregates (Squad D): compact per-player totals
+  /// precomputed from the whole Cricsheet archive
+  /// (assets/cricsheet_stats.json, 2001-2026, 9,943 internationals)
+  /// by tools/aggregate_cricsheet.py. Null when the asset is absent
+  /// — every query then falls back to the bundled sample, exactly
+  /// as before. Aggregates are NEVER summed with sample totals for
+  /// the same player: the archive is a superset of the sample, so
+  /// summing would double-count every sampled match. When an
+  /// aggregate exists for a player it REPLACES the sample scope;
+  /// the sample is used only when no aggregate exists.
+  final CricsheetAggregate? aggregate;
+
+  /// DELTA (Squad D): finished matches that ended AFTER the base
+  /// asset was generated, converted from their final scorecards
+  /// (see [applyFinishedMatch]). Totals shown = base + delta.
+  /// Persisted via SharedPreferences (see [persistDelta] /
+  /// [loadPersistedDelta]) — ApiService's caches are in-memory
+  /// only and die on restart, so an in-memory-only delta would be
+  /// lost. Never faked: a match with no scorecard stays pending.
+  CricsheetDelta delta;
+
+  CricsheetService(this.matches,
+      {this.aggregate, CricsheetDelta? delta})
+      : delta = delta ?? CricsheetDelta.empty();
 
   /// Empty service — every query returns null / []. Never throws.
-  CricsheetService.empty() : matches = const [];
+  CricsheetService.empty()
+      : matches = const [],
+        aggregate = null,
+        delta = CricsheetDelta.empty();
 
   int get matchCount => matches.length;
 
   static const String assetPath = 'assets/cricsheet_sample.json';
+
+  /// Full-archive aggregate asset (see tools/aggregate_cricsheet.py).
+  static const String aggregateAssetPath = 'assets/cricsheet_stats.json';
   static const String sourceLabel = 'cricsheet';
+
+  /// Honest coverage label for UI (merge step renders it, screens
+  /// are another squad's files): full-archive range + match count
+  /// when aggregates loaded, otherwise the sample-only truth.
+  bool get hasFullAggregates =>
+      aggregate != null && aggregate!.matchCount > 0;
+  int get aggregateMatchCount => aggregate?.matchCount ?? 0;
+  String get aggregateCoverageLabel {
+    final a = aggregate;
+    if (a == null || a.matchCount == 0) {
+      return 'Sample • $matchCount matches (2025–2026)';
+    }
+    return 'Full archive ${a.yearMin}–${a.yearMax} • '
+        '${a.matchCount} matches';
+  }
+
+  /// Delta bookkeeping for UI / merge wiring.
+  int get deltaMatchCount => delta.matches.length;
+  Set<String> get pendingDeltaMatchIds => delta.pendingIds;
 
   /// App-wide cache for the bundled asset: the 25 MB asset is
   /// parsed ONCE per app run, no matter how many ApiService
@@ -157,24 +207,240 @@ class CricsheetService {
   /// service when the asset is missing or malformed.
   static Future<CricsheetService>? _bundledCache;
 
-  /// Load the bundled sample asset. Never throws: returns an empty
-  /// service when the asset is missing or malformed.
+  /// Load the bundled sample asset + the full-archive aggregate
+  /// asset. Never throws: returns an empty service when the sample
+  /// is missing or malformed; a missing aggregate just means
+  /// sample-only totals (see [hasFullAggregates]).
   static Future<CricsheetService> loadBundled({AssetBundle? bundle}) async {
     if (bundle != null) {
       try {
-        return parse(await bundle.loadString(assetPath));
+        final svc = parse(await bundle.loadString(assetPath));
+        CricsheetAggregate? agg;
+        try {
+          agg = CricsheetAggregate.parse(
+              await bundle.loadString(aggregateAssetPath));
+        } catch (_) {}
+        return CricsheetService(svc.matches, aggregate: agg);
       } catch (_) {
         return CricsheetService.empty();
       }
     }
     _bundledCache ??= (() async {
       try {
-        return parse(await rootBundle.loadString(assetPath));
+        final svc = parse(await rootBundle.loadString(assetPath));
+        CricsheetAggregate? agg;
+        try {
+          agg = CricsheetAggregate.parse(
+              await rootBundle.loadString(aggregateAssetPath));
+        } catch (_) {}
+        return CricsheetService(svc.matches, aggregate: agg);
       } catch (_) {
         return CricsheetService.empty();
       }
     })();
     return _bundledCache!;
+  }
+
+  // ---- Delta persistence + application (Squad D) -------------------
+
+  static const String _deltaPrefsKey = 'kingcric_cricsheet_delta_v1';
+
+  /// Persist the delta (processed match ids + per-match increments
+  /// + pending ids) on-device. Call after every successful
+  /// [applyFinishedMatch]. Never throws.
+  Future<void> persistDelta() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_deltaPrefsKey, jsonEncode(delta.toJson()));
+    } catch (_) {}
+  }
+
+  /// Load the persisted delta into this service (merge step calls
+  /// this once after [loadBundled]). Drops delta matches the new
+  /// base already absorbed (see [pruneDeltaAbsorbedByBase]).
+  /// Never throws.
+  Future<void> loadPersistedDelta() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_deltaPrefsKey);
+      if (raw == null || raw.isEmpty) return;
+      delta = CricsheetDelta.fromJson(
+          jsonDecode(raw) as Map<String, dynamic>);
+      pruneDeltaAbsorbedByBase();
+    } catch (_) {}
+  }
+
+  /// Base-regeneration absorption: when the app ships a newer
+  /// aggregate asset, every delta match dated on/before the new
+  /// base's coverageEnd is already inside the base — keeping its
+  /// delta would double-count it. Drop those delta matches (and
+  /// their pending entries). Matches after coverageEnd stay.
+  /// No-op when no aggregate / no coverageEnd is loaded.
+  void pruneDeltaAbsorbedByBase() {
+    final end = aggregate?.coverageEnd ?? '';
+    if (end.isEmpty) return;
+    delta.matches.removeWhere((_, m) =>
+        m.date.isNotEmpty && m.date.compareTo(end) <= 0);
+    delta.pending.removeWhere((_, d) => d.isNotEmpty && d.compareTo(end) <= 0);
+  }
+
+  /// Convert a FINISHED match's final scorecard into per-player
+  /// delta increments, on top of the bundled aggregates.
+  /// Dedupe: a match id already in [delta] is NEVER counted twice
+  /// — repeat calls (finish event + manual refresh, app restarts
+  /// via persisted delta) return [DeltaApplyResult.alreadyProcessed]
+  /// with totals unchanged. A finished match with no innings
+  /// (scorecard unavailable from every provider) is recorded as
+  /// PENDING ([pendingDeltaMatchIds]) and returns
+  /// [DeltaApplyResult.noScorecard] — never faked, never counted.
+  /// Caller persists via [persistDelta] after [applied].
+  DeltaApplyResult applyFinishedMatch(CricketMatch detail) {
+    if (delta.matches.containsKey(detail.id)) {
+      return DeltaApplyResult.alreadyProcessed;
+    }
+    if (detail.innings.isEmpty) {
+      delta.pending[detail.id] = detail.startTime.year >= 2000
+          ? detail.startTime.toIso8601String().substring(0, 10)
+          : '';
+      return DeltaApplyResult.noScorecard;
+    }
+    final format = normalizeFormat(detail.format);
+    final venue = detail.venueName;
+    final league =
+        detail.league.trim().isNotEmpty ? detail.league : 'International';
+    final batAcc = <String, Map<String, _DeltaBatAcc>>{};
+    final bowlAcc = <String, Map<String, _DeltaBowlAcc>>{};
+    final batSeen = <String>{}; // "$player|$scope" match-counted once
+    final bowlSeen = <String>{};
+
+    _DeltaBatAcc batFor(String player, String scope) {
+      final m = batAcc[player] ??= {};
+      return m[scope] ??= _DeltaBatAcc();
+    }
+
+    _DeltaBowlAcc bowlFor(String player, String scope) {
+      final m = bowlAcc[player] ??= {};
+      return m[scope] ??= _DeltaBowlAcc();
+    }
+
+    for (var ii = 0; ii < detail.innings.length; ii++) {
+      final inn = detail.innings[ii];
+      final batTeam = inn.team;
+      final bowlTeam =
+          batTeam == detail.teamA ? detail.teamB : detail.teamA;
+      final batScopes = <String>[
+        'all',
+        'fmt:$format',
+        'opp:$bowlTeam',
+        if (venue.isNotEmpty) 'ven:$venue',
+        'lg:$league',
+      ];
+      final bowlScopes = <String>[
+        'all',
+        'fmt:$format',
+        'opp:$batTeam',
+        if (venue.isNotEmpty) 'ven:$venue',
+        'lg:$league',
+      ];
+      for (final b in inn.batting) {
+        if (b.playerName.trim().isEmpty) continue;
+        for (final s in batScopes) {
+          final a = batFor(b.playerName, s);
+          if (batSeen.add('${b.playerName}|$s')) a.matches += 1;
+          a.innings += 1;
+          a.innRuns[ii] = (a.innRuns[ii] ?? 0) + b.runs;
+          a.runs += b.runs;
+          a.balls += b.balls;
+          a.fours += b.fours;
+          a.sixes += b.sixes;
+          if (!b.notOut) a.dismissals += 1;
+        }
+      }
+      for (final bw in inn.bowling) {
+        if (bw.playerName.trim().isEmpty) continue;
+        final balls = _oversToBalls(bw.overs);
+        if (balls <= 0 && bw.wickets <= 0) continue;
+        for (final s in bowlScopes) {
+          final a = bowlFor(bw.playerName, s);
+          if (bowlSeen.add('${bw.playerName}|$s')) a.matches += 1;
+          a.innings += 1;
+          a.balls += balls;
+          a.runs += bw.runsConceded;
+          a.wickets += bw.wickets;
+          a.innWkts[ii] = (a.innWkts[ii] ?? 0) + bw.wickets;
+          a.innRuns[ii] = (a.innRuns[ii] ?? 0) + bw.runsConceded;
+        }
+      }
+    }
+
+    Map<String, Map<String, List<int>>> emitBat(
+        Map<String, Map<String, _DeltaBatAcc>> acc) {
+      final out = <String, Map<String, List<int>>>{};
+      for (final e in acc.entries) {
+        final scopes = <String, List<int>>{};
+        for (final s in e.value.entries) {
+          scopes[s.key] = s.value.emit();
+        }
+        if (scopes.isNotEmpty) out[e.key] = scopes;
+      }
+      return out;
+    }
+
+    Map<String, Map<String, List<int>>> emitBowl(
+        Map<String, Map<String, _DeltaBowlAcc>> acc) {
+      final out = <String, Map<String, List<int>>>{};
+      for (final e in acc.entries) {
+        final scopes = <String, List<int>>{};
+        for (final s in e.value.entries) {
+          scopes[s.key] = s.value.emit();
+        }
+        if (scopes.isNotEmpty) out[e.key] = scopes;
+      }
+      return out;
+    }
+
+    // Store under the raw scorecard name AND the resolved short
+    // name when different, so profile lookups (which resolve to
+    // shorts) find the delta. Lookups pick ONE key (see
+    // [_deltaKeyFor]), so dual storage never double-counts.
+    Map<String, Map<String, List<int>>> dualKey(
+        Map<String, Map<String, List<int>>> m) {
+      final out = Map<String, Map<String, List<int>>>.of(m);
+      for (final name in m.keys.toList()) {
+        final short = resolveShortName(name);
+        if (short != null && short != name) out[short] = m[name]!;
+      }
+      return out;
+    }
+
+    delta.matches[detail.id] = CricsheetDeltaMatch(
+      matchId: detail.id,
+      date: detail.startTime.year >= 2000
+          ? detail.startTime.toIso8601String().substring(0, 10)
+          : '',
+      format: format,
+      venue: venue,
+      league: league,
+      teamA: detail.teamA,
+      teamB: detail.teamB,
+      bat: dualKey(emitBat(batAcc)),
+      bowl: dualKey(emitBowl(bowlAcc)),
+    );
+    delta.pending.remove(detail.id);
+    return DeltaApplyResult.applied;
+  }
+
+  /// Cricket-notation overs (4.2 = 4 overs, 2 balls) -> ball count.
+  /// A fractional part that rounds to 6 carries into the next over.
+  static int _oversToBalls(double overs) {
+    if (overs <= 0) return 0;
+    var whole = overs.floor();
+    var balls = ((overs - whole) * 10).round();
+    if (balls >= 6) {
+      whole += 1;
+      balls -= 6;
+    }
+    return whole * 6 + balls;
   }
 
   /// Parse a Cricsheet JSON document: either a single match object
@@ -747,6 +1013,185 @@ class CricsheetService {
     return null;
   }
 
+  // ---- Aggregate + delta scope conversion (Squad D) ---------------
+
+  /// Aggregate bat array [matches, innings, runs, balls, fours,
+  /// sixes, dismissals, fifties, hundreds, highest] -> BattingStats.
+  /// Average = runs / dismissals; never dismissed with innings =
+  /// runs (mirrors the sample index's convention), never a fake 0.
+  static BattingStats _battingFromBatScope(List<int> a) {
+    int at(int i) => i < a.length ? a[i] : 0;
+    final runs = at(2);
+    final balls = at(3);
+    final dismissals = at(6);
+    return BattingStats(
+      matches: at(0),
+      innings: at(1),
+      runs: runs,
+      balls: balls,
+      fours: at(4),
+      sixes: at(5),
+      fifties: at(7),
+      hundreds: at(8),
+      average: dismissals > 0
+          ? runs / dismissals
+          : (at(1) > 0 ? runs.toDouble() : 0),
+      strikeRate: balls > 0 ? runs * 100 / balls : 0,
+      highest: at(9),
+    );
+  }
+
+  /// Aggregate bowl array [matches, innings, wickets, balls,
+  /// runsConceded, fiveWickets, bestWkts, bestRuns] -> BowlingStats.
+  static BowlingStats _bowlingFromBowlScope(List<int> a) {
+    int at(int i) => i < a.length ? a[i] : 0;
+    final wkts = at(2);
+    final balls = at(3);
+    final rc = at(4);
+    return BowlingStats(
+      matches: at(0),
+      innings: at(1),
+      wickets: wkts,
+      balls: balls,
+      runsConceded: rc,
+      economy: balls > 0 ? rc * 6 / balls : 0,
+      average: wkts > 0 ? rc / wkts : 0,
+      strikeRate: wkts > 0 ? balls / wkts : 0,
+      fiveWickets: at(5),
+      best: wkts > 0 ? '${at(6)}/${at(7)}' : '-',
+    );
+  }
+
+  /// Merge two bowling blocks (base + delta). Best = more wickets,
+  /// tie -> fewer runs; '-' never beats a real figure.
+  static BowlingStats _mergeBowling(BowlingStats a, BowlingStats b) {
+    var best = a.best;
+    if (b.best != '-' && b.best.isNotEmpty) {
+      if (a.best == '-' || a.best.isEmpty) {
+        best = b.best;
+      } else {
+        final aw = int.tryParse(a.best.split('/').first) ?? 0;
+        final bw = int.tryParse(b.best.split('/').first) ?? 0;
+        final ar = int.tryParse(a.best.split('/').last) ?? 0;
+        final br = int.tryParse(b.best.split('/').last) ?? 0;
+        if (bw > aw || (bw == aw && br < ar)) best = b.best;
+      }
+    }
+    final balls = a.balls + b.balls;
+    final rc = a.runsConceded + b.runsConceded;
+    final wkts = a.wickets + b.wickets;
+    return BowlingStats(
+      matches: a.matches + b.matches,
+      innings: a.innings + b.innings,
+      wickets: wkts,
+      balls: balls,
+      runsConceded: rc,
+      economy: balls > 0 ? rc * 6 / balls : 0,
+      average: wkts > 0 ? rc / wkts : 0,
+      strikeRate: wkts > 0 ? balls / wkts : 0,
+      fiveWickets: a.fiveWickets + b.fiveWickets,
+      best: best,
+    );
+  }
+
+  /// Delta lookup key for a short name: the short itself, else the
+  /// identity display name (scorecards use full names), else null.
+  /// Only ONE key is ever used, so dual-key storage at apply time
+  /// can never double-count.
+  String? _deltaKeyFor(String shortName) {
+    if (delta.matches.values
+        .any((m) => m.bat.containsKey(shortName) || m.bowl.containsKey(shortName))) {
+      return shortName;
+    }
+    final display = _identityFor(shortName)?.displayName;
+    if (display != null &&
+        delta.matches.values.any(
+            (m) => m.bat.containsKey(display) || m.bowl.containsKey(display))) {
+      return display;
+    }
+    return null;
+  }
+
+  bool _deltaHasPlayer(String shortName) => _deltaKeyFor(shortName) != null;
+
+  /// Delta scopes summed across all delta matches for one player:
+  /// {scope -> bat array} and {scope -> bowl array}. Empty when the
+  /// player has no delta matches. Sums are over DISTINCT match ids
+  /// (delta.matches is keyed by id), so a repeated finish event
+  /// can never inflate them — dedupe lives in apply, not here.
+  ({Map<String, List<int>> bat, Map<String, List<int>> bowl})
+      _deltaScopesFor(String shortName) {
+    final key = _deltaKeyFor(shortName);
+    final bat = <String, List<int>>{};
+    final bowl = <String, List<int>>{};
+    if (key == null) return (bat: bat, bowl: bowl);
+    void add(Map<String, List<int>> acc, String scope, List<int> arr) {
+      final cur = acc[scope];
+      if (cur == null) {
+        acc[scope] = List<int>.of(arr);
+        return;
+      }
+      for (var i = 0; i < arr.length && i < cur.length; i++) {
+        // Index 9 (highest) / bowl best indices are maxima, not sums.
+        if (i == 9) {
+          if (arr[i] > cur[i]) cur[i] = arr[i];
+        } else {
+          cur[i] += arr[i];
+        }
+      }
+    }
+
+    for (final m in delta.matches.values) {
+      final b = m.bat[key];
+      if (b != null) {
+        for (final e in b.entries) {
+          add(bat, e.key, e.value);
+        }
+      }
+      final w = m.bowl[key];
+      if (w != null) {
+        for (final e in w.entries) {
+          add(bowl, e.key, e.value);
+        }
+      }
+    }
+    // Bowling best (indices 6/7) cannot be summed: recompute from
+    // per-match best figures is impossible from sums alone, so the
+    // merged best below is derived in [_mergeDeltaBowling] from
+    // per-match entries, not from these sums. To keep this helper
+    // honest, bowl sums carry bestWkts/bestRuns as maxima.
+    for (final e in bowl.entries) {
+      // Recompute maxima across matches for indices 6/7.
+      var bw = 0;
+      var br = 0;
+      for (final m in delta.matches.values) {
+        final arr = m.bowl[key]?[e.key];
+        if (arr == null || arr.length < 8) continue;
+        if (arr[6] > bw || (arr[6] == bw && arr[7] < br)) {
+          bw = arr[6];
+          br = arr[7];
+        }
+      }
+      if (e.value.length >= 8) {
+        e.value[6] = bw;
+        e.value[7] = br;
+      }
+    }
+    return (bat: bat, bowl: bowl);
+  }
+
+  /// Delta matches a player appeared in (batted or bowled), for
+  /// [Player.sourceMatches] when aggregates are present.
+  int _deltaMatchCountFor(String shortName) {
+    final key = _deltaKeyFor(shortName);
+    if (key == null) return 0;
+    var n = 0;
+    for (final m in delta.matches.values) {
+      if (m.bat.containsKey(key) || m.bowl.containsKey(key)) n += 1;
+    }
+    return n;
+  }
+
   // ---- Public queries --------------------------------------------------
 
   /// Full player profile calculated from ball-by-ball data.
@@ -759,64 +1204,139 @@ class CricsheetService {
 
   Player? playerByShortName(String shortName) {
     final idx = _index;
-    // CRICSHEET-WIRING: any name in the dataset builds a profile —
-    // the old code returned null for everyone outside the 44-name
-    // identity map. Display name is the full name when known,
-    // otherwise the Cricsheet short name as-is (never invented).
-    if (!idx.knownShorts.contains(shortName)) return null;
+    final aggPlayer = aggregate?.players[shortName];
+    final inSample = idx.knownShorts.contains(shortName);
+    // A player known ONLY via the full archive or via delta is
+    // still real — the old sample-only gate returned null for
+    // ~8,000 archive players. Absent everywhere -> null, never fake.
+    if (!inSample && aggPlayer == null && !_deltaHasPlayer(shortName)) {
+      return null;
+    }
     final ident = _identityFor(shortName);
-    final team = _teamOf(shortName);
-    final batMap = idx.bat[shortName] ?? {};
-    final bowlMap = idx.bowl[shortName] ?? {};
+    final team = inSample ? _teamOf(shortName) : (aggPlayer?.team ?? '');
 
     final battingByFormat = <String, BattingStats>{};
     final bowlingByFormat = <String, BowlingStats>{};
-    for (final fmt in ['Test', 'ODI', 'T20', 'T10']) {
-      final bat = batMap['fmt:$fmt'];
-      // WIRING correctness fix: `matches` is now scope-aware (XI
-      // matches IN this format). The old per-scope accumulator
-      // added EVERY XI match to every format, inflating
-      // battingOverall().matches across formats.
-      if (bat != null &&
-          (bat.innings.isNotEmpty || bat.matches.isNotEmpty)) {
-        battingByFormat[fmt] = _battingFromAgg(bat);
-      }
-      final bowl = bowlMap['fmt:$fmt'];
-      if (bowl != null && bowl.innings.isNotEmpty) {
-        bowlingByFormat[fmt] = _bowlingFromAgg(bowl);
-      }
-    }
     final battingVsOpponent = <String, BattingStats>{};
     final bowlingVsOpponent = <String, BowlingStats>{};
-    final opponents = <String>{};
-    for (final m in matches) {
-      for (final t in m.teams) {
-        if (t != team) opponents.add(t);
-      }
-    }
-    for (final opp in opponents) {
-      final bat = batMap['opp:$opp'];
-      if (bat != null && bat.innings.isNotEmpty) {
-        battingVsOpponent[opp] = _battingFromAgg(bat);
-      }
-      final bowl = bowlMap['opp:$opp'];
-      if (bowl != null && bowl.innings.isNotEmpty) {
-        bowlingVsOpponent[opp] = _bowlingFromAgg(bowl);
-      }
-    }
     final battingByVenue = <String, BattingStats>{};
-    for (final venue in idx.venues) {
-      if (venue.isEmpty) continue;
-      final bat = batMap['ven:$venue'];
-      if (bat != null && bat.innings.isNotEmpty) {
-        battingByVenue[venue] = _battingFromAgg(bat);
+    final battingByLeague = <String, BattingStats>{};
+
+    if (aggPlayer != null) {
+      // FULL ARCHIVE base: replaces sample scopes for this player
+      // (the archive is a superset of the sample — summing both
+      // would double-count every sampled match).
+      for (final fmt in ['Test', 'ODI', 'T20', 'T10']) {
+        final bat = aggPlayer.bat['fmt:$fmt'];
+        if (bat != null) battingByFormat[fmt] = _battingFromBatScope(bat);
+        final bowl = aggPlayer.bowl['fmt:$fmt'];
+        if (bowl != null) {
+          bowlingByFormat[fmt] = _bowlingFromBowlScope(bowl);
+        }
+      }
+      for (final e in aggPlayer.bat.entries) {
+        if (e.key.startsWith('opp:')) {
+          battingVsOpponent[e.key.substring(4)] = _battingFromBatScope(e.value);
+        } else if (e.key.startsWith('ven:')) {
+          battingByVenue[e.key.substring(4)] = _battingFromBatScope(e.value);
+        } else if (e.key.startsWith('lg:')) {
+          battingByLeague[e.key.substring(3)] = _battingFromBatScope(e.value);
+        }
+      }
+      for (final e in aggPlayer.bowl.entries) {
+        if (e.key.startsWith('opp:')) {
+          bowlingVsOpponent[e.key.substring(4)] =
+              _bowlingFromBowlScope(e.value);
+        }
+      }
+    } else if (inSample) {
+      // SAMPLE fallback (unchanged logic): only when the player
+      // has no full-archive aggregate at all.
+      final batMap = idx.bat[shortName] ?? {};
+      final bowlMap = idx.bowl[shortName] ?? {};
+      for (final fmt in ['Test', 'ODI', 'T20', 'T10']) {
+        final bat = batMap['fmt:$fmt'];
+        if (bat != null &&
+            (bat.innings.isNotEmpty || bat.matches.isNotEmpty)) {
+          battingByFormat[fmt] = _battingFromAgg(bat);
+        }
+        final bowl = bowlMap['fmt:$fmt'];
+        if (bowl != null && bowl.innings.isNotEmpty) {
+          bowlingByFormat[fmt] = _bowlingFromAgg(bowl);
+        }
+      }
+      final opponents = <String>{};
+      for (final m in matches) {
+        for (final t in m.teams) {
+          if (t != team) opponents.add(t);
+        }
+      }
+      for (final opp in opponents) {
+        final bat = batMap['opp:$opp'];
+        if (bat != null && bat.innings.isNotEmpty) {
+          battingVsOpponent[opp] = _battingFromAgg(bat);
+        }
+        final bowl = bowlMap['opp:$opp'];
+        if (bowl != null && bowl.innings.isNotEmpty) {
+          bowlingVsOpponent[opp] = _bowlingFromAgg(bowl);
+        }
+      }
+      for (final venue in idx.venues) {
+        if (venue.isEmpty) continue;
+        final bat = batMap['ven:$venue'];
+        if (bat != null && bat.innings.isNotEmpty) {
+          battingByVenue[venue] = _battingFromAgg(bat);
+        }
+      }
+      for (final league in idx.leagues) {
+        final bat = batMap['lg:$league'];
+        if (bat != null && bat.innings.isNotEmpty) {
+          battingByLeague[league] = _battingFromAgg(bat);
+        }
       }
     }
-    final battingByLeague = <String, BattingStats>{};
-    for (final league in idx.leagues) {
-      final bat = batMap['lg:$league'];
-      if (bat != null && bat.innings.isNotEmpty) {
-        battingByLeague[league] = _battingFromAgg(bat);
+
+    // DELTA on top of whichever base (aggregate or sample):
+    // finished matches since the base was generated. Pure addition
+    // of per-scope blocks — re-running it recomputes the same
+    // totals, so it can never double-count.
+    final dScopes = _deltaScopesFor(shortName);
+    for (final e in dScopes.bat.entries) {
+      final s = _battingFromBatScope(e.value);
+      if (e.key.startsWith('fmt:')) {
+        final f = e.key.substring(4);
+        battingByFormat[f] = battingByFormat.containsKey(f)
+            ? battingByFormat[f]! + s
+            : s;
+      } else if (e.key.startsWith('opp:')) {
+        final o = e.key.substring(4);
+        battingVsOpponent[o] = battingVsOpponent.containsKey(o)
+            ? battingVsOpponent[o]! + s
+            : s;
+      } else if (e.key.startsWith('ven:')) {
+        final v = e.key.substring(4);
+        battingByVenue[v] = battingByVenue.containsKey(v)
+            ? battingByVenue[v]! + s
+            : s;
+      } else if (e.key.startsWith('lg:')) {
+        final l = e.key.substring(3);
+        battingByLeague[l] = battingByLeague.containsKey(l)
+            ? battingByLeague[l]! + s
+            : s;
+      }
+    }
+    for (final e in dScopes.bowl.entries) {
+      final s = _bowlingFromBowlScope(e.value);
+      if (e.key.startsWith('fmt:')) {
+        final f = e.key.substring(4);
+        bowlingByFormat[f] = bowlingByFormat.containsKey(f)
+            ? _mergeBowling(bowlingByFormat[f]!, s)
+            : s;
+      } else if (e.key.startsWith('opp:')) {
+        final o = e.key.substring(4);
+        bowlingVsOpponent[o] = bowlingVsOpponent.containsKey(o)
+            ? _mergeBowling(bowlingVsOpponent[o]!, s)
+            : s;
       }
     }
 
@@ -826,9 +1346,10 @@ class CricsheetService {
     if (ident != null) {
       role = ident.role;
     } else {
-      final batted = (batMap['all']?.balls ?? 0) > 0 ||
-          (batMap['all']?.innings.isNotEmpty ?? false);
-      final bowled = (bowlMap['all']?.balls ?? 0) > 0;
+      final batted = battingByFormat.values
+          .any((s) => s.balls > 0 || s.innings > 0);
+      final bowled =
+          bowlingByFormat.values.any((s) => s.balls > 0);
       role = bowled && batted
           ? 'All-rounder'
           : bowled
@@ -836,6 +1357,9 @@ class CricsheetService {
               : 'Batter';
     }
 
+    final baseMatches = aggPlayer != null
+        ? (aggPlayer.bat['all']?.firstOrNull ?? 0)
+        : (idx.playerXiMatches[shortName]?.length ?? 0);
     return Player(
       id: ident?.id ?? 'cs-${shortName.replaceAll(' ', '_')}',
       name: ident?.displayName ?? shortName,
@@ -856,16 +1380,35 @@ class CricsheetService {
       dataComplete: true,
       lastUpdated: DateTime.now(),
       source: sourceLabel,
-      sourceMatches: idx.playerXiMatches[shortName]?.length ?? 0,
+      sourceMatches: baseMatches + _deltaMatchCountFor(shortName),
     );
   }
 
   /// Bowler-vs-batter matchup: balls / runs / bowler-credited
   /// dismissals for one pair across all loaded matches.
+  /// Full-archive pair first (superset of the sample), then sample.
   Matchup matchup(
       {required String bowler, required String batter}) {
     final bowlerShort = resolveShortName(bowler) ?? bowler;
     final batterShort = resolveShortName(batter) ?? batter;
+    final aggPair =
+        aggregate?.players[bowlerShort]?.pairs[batterShort];
+    if (aggPair != null && aggPair.length >= 4) {
+      return Matchup(
+        bowlerId: _identities[bowlerShort]?.id ??
+            'cs-${bowlerShort.replaceAll(' ', '_')}',
+        bowlerName:
+            _identities[bowlerShort]?.displayName ?? bowlerShort,
+        batterId: _identities[batterShort]?.id ??
+            'cs-${batterShort.replaceAll(' ', '_')}',
+        batterName:
+            _identities[batterShort]?.displayName ?? batterShort,
+        matches: aggPair[0],
+        balls: aggPair[1],
+        runs: aggPair[2],
+        dismissals: aggPair[3],
+      );
+    }
     final pair = _index.pairs[bowlerShort]?[batterShort];
     return Matchup(
       bowlerId: _identities[bowlerShort]?.id ??
@@ -885,13 +1428,30 @@ class CricsheetService {
 
   /// All matchups for one batter (vs every bowler who bowled to them),
   /// most balls first. Used for the profile "Bowler vs Batter" section.
+  /// Full-archive pairs first when any exist for this batter
+  /// (pairs live under the BOWLER in the aggregate), else sample.
   List<Matchup> matchupsForBatter(String batter) {
     final batterShort = resolveShortName(batter) ?? batter;
+    final agg = aggregate;
+    if (agg != null) {
+      final out = <Matchup>[];
+      for (final e in agg.players.entries) {
+        final pair = e.value.pairs[batterShort];
+        if (pair != null && pair.length >= 4 && pair[1] > 0) {
+          out.add(matchup(bowler: e.key, batter: batterShort));
+        }
+      }
+      if (out.isNotEmpty) {
+        out.sort((a, b) => b.balls.compareTo(a.balls));
+        return out.take(6).toList();
+      }
+    }
+    final batterShort2 = batterShort;
     final out = <Matchup>[];
     for (final e in _index.pairs.entries) {
-      final pair = e.value[batterShort];
+      final pair = e.value[batterShort2];
       if (pair != null && pair.balls > 0) {
-        out.add(matchup(bowler: e.key, batter: batterShort));
+        out.add(matchup(bowler: e.key, batter: batterShort2));
       }
     }
     out.sort((a, b) => b.balls.compareTo(a.balls));
@@ -901,8 +1461,35 @@ class CricsheetService {
   /// "c X b Y — N times" lines, plus one "Never dismissed by Z"
   /// line for the bowler with most balls and zero dismissals
   /// (min 12 balls), when one exists.
+  /// Full-archive lines first when present for this batter
+  /// (wholesale — aggregate and sample lines use different name
+  /// forms and must never be mixed for one batter), else sample.
   List<String> dismissalHistoryFor(String batter) {
     final batterShort = resolveShortName(batter) ?? batter;
+    final aggPlayer = aggregate?.players[batterShort];
+    if (aggPlayer != null && aggPlayer.dis.isNotEmpty) {
+      final lines = aggPlayer.dis.entries
+          .map((e) => '${e.key} — ${e.value} time${e.value == 1 ? '' : 's'}')
+          .toList()
+        ..sort();
+      String? best;
+      var bestBalls = 0;
+      for (final e in aggregate!.players.entries) {
+        final pair = e.value.pairs[batterShort];
+        if (pair != null &&
+            pair.length >= 4 &&
+            pair[3] == 0 &&
+            pair[1] > bestBalls) {
+          best = e.key;
+          bestBalls = pair[1];
+        }
+      }
+      if (best != null && bestBalls >= 12) {
+        final name = _identities[best]?.displayName ?? best;
+        lines.add('Not dismissed by $name in $bestBalls balls');
+      }
+      return lines;
+    }
     final idx = _index;
     final counts = idx.dismissalCounts[batterShort] ?? {};
     final bowlerBalls = idx.bowlerBallsVs[batterShort] ?? {};
@@ -1290,6 +1877,323 @@ class CricsheetService {
       }
     }
     return out;
+  }
+}
+
+/// FULL-ARCHIVE aggregate player (Squad D): compact totals from
+/// tools/aggregate_cricsheet.py. Scope arrays mirror the script:
+/// bat [matches, innings, runs, balls, fours, sixes, dismissals,
+/// fifties, hundreds, highest]; bowl [matches, innings, wickets,
+/// balls, runsConceded, fiveWickets, bestWkts, bestRuns].
+/// Scope keys: "all", "fmt:<fmt>", "opp:<team>", "ven:<venue>",
+/// "lg:<league>". Pairs live under the BOWLER: {batterShort:
+/// [matches, balls, runs, dismissals]} (balls >= 12 only — one-off
+/// pairs are noise; totals are unaffected).
+class CricsheetAggPlayer {
+  final String team;
+  final Map<String, List<int>> bat;
+  final Map<String, List<int>> bowl;
+  final Map<String, int> dis;
+  final Map<String, List<int>> pairs;
+
+  const CricsheetAggPlayer({
+    required this.team,
+    required this.bat,
+    required this.bowl,
+    required this.dis,
+    required this.pairs,
+  });
+
+  factory CricsheetAggPlayer.fromJson(Map<String, dynamic> j) {
+    Map<String, List<int>> scopes(Object? v) {
+      final out = <String, List<int>>{};
+      if (v is Map) {
+        for (final e in v.entries) {
+          final l = e.value;
+          if (l is List) {
+            out['${e.key}'] =
+                l.map((x) => (x as num?)?.toInt() ?? 0).toList();
+          }
+        }
+      }
+      return out;
+    }
+
+    final dis = <String, int>{};
+    final d = j['dis'];
+    if (d is Map) {
+      for (final e in d.entries) {
+        dis['${e.key}'] = (e.value as num?)?.toInt() ?? 0;
+      }
+    }
+    return CricsheetAggPlayer(
+      team: '${j['team'] ?? ''}',
+      bat: scopes(j['bat']),
+      bowl: scopes(j['bowl']),
+      dis: dis,
+      pairs: scopes(j['pairs']),
+    );
+  }
+}
+
+/// FULL-ARCHIVE aggregate document (assets/cricsheet_stats.json).
+/// Never throws on parse: malformed input yields an empty aggregate
+/// and callers fall back to the sample.
+class CricsheetAggregate {
+  final int matchCount;
+  final String yearMin;
+  final String yearMax;
+
+  /// Latest match date in the base (yyyy-mm-dd). Delta pruning
+  /// drops finished-match deltas dated <= this: a regenerated base
+  /// already contains them.
+  final String coverageEnd;
+  final Map<String, CricsheetAggPlayer> players;
+
+  const CricsheetAggregate({
+    required this.matchCount,
+    required this.yearMin,
+    required this.yearMax,
+    required this.coverageEnd,
+    required this.players,
+  });
+
+  factory CricsheetAggregate.parse(String jsonText) {
+    try {
+      final decoded = jsonDecode(jsonText);
+      if (decoded is! Map<String, dynamic>) {
+        return const CricsheetAggregate(
+            matchCount: 0,
+            yearMin: '',
+            yearMax: '',
+            coverageEnd: '',
+            players: {});
+      }
+      final meta = decoded['meta'];
+      final metaMap = meta is Map<String, dynamic> ? meta : {};
+      final raw = decoded['players'];
+      final players = <String, CricsheetAggPlayer>{};
+      if (raw is Map) {
+        for (final e in raw.entries) {
+          if (e.value is Map<String, dynamic>) {
+            players['${e.key}'] =
+                CricsheetAggPlayer.fromJson(e.value);
+          }
+        }
+      }
+      return CricsheetAggregate(
+        matchCount: (metaMap['matches'] as num?)?.toInt() ?? 0,
+        yearMin: '${metaMap['yearMin'] ?? ''}',
+        yearMax: '${metaMap['yearMax'] ?? ''}',
+        coverageEnd: '${metaMap['coverageEnd'] ?? ''}',
+        players: players,
+      );
+    } catch (_) {
+      return const CricsheetAggregate(
+          matchCount: 0,
+          yearMin: '',
+          yearMax: '',
+          coverageEnd: '',
+          players: {});
+    }
+  }
+}
+
+/// Outcome of [CricsheetService.applyFinishedMatch].
+enum DeltaApplyResult {
+  /// Scorecard converted and counted (caller persists via
+  /// [CricsheetService.persistDelta]).
+  applied,
+
+  /// This match id was already counted — totals unchanged.
+  alreadyProcessed,
+
+  /// No innings in the detail: recorded as pending, never counted,
+  /// never faked.
+  noScorecard,
+}
+
+/// One finished match's delta increments, keyed by player name as
+/// it appears in the scorecard (plus the resolved short name when
+/// different — see [CricsheetService.applyFinishedMatch]).
+/// Scope arrays use the same layout as [CricsheetAggPlayer].
+class CricsheetDeltaMatch {
+  final String matchId;
+  final String date; // yyyy-mm-dd, '' when unknown
+  final String format;
+  final String venue;
+  final String league;
+  final String teamA;
+  final String teamB;
+  final Map<String, Map<String, List<int>>> bat;
+  final Map<String, Map<String, List<int>>> bowl;
+
+  const CricsheetDeltaMatch({
+    required this.matchId,
+    required this.date,
+    required this.format,
+    required this.venue,
+    required this.league,
+    required this.teamA,
+    required this.teamB,
+    required this.bat,
+    required this.bowl,
+  });
+
+  Map<String, dynamic> toJson() => {
+        'matchId': matchId,
+        'date': date,
+        'format': format,
+        'venue': venue,
+        'league': league,
+        'teamA': teamA,
+        'teamB': teamB,
+        'bat': bat,
+        'bowl': bowl,
+      };
+
+  factory CricsheetDeltaMatch.fromJson(Map<String, dynamic> j) {
+    Map<String, Map<String, List<int>>> scopes(Object? v) {
+      final out = <String, Map<String, List<int>>>{};
+      if (v is Map) {
+        for (final pe in v.entries) {
+          final sm = <String, List<int>>{};
+          final sv = pe.value;
+          if (sv is Map) {
+            for (final se in sv.entries) {
+              final l = se.value;
+              if (l is List) {
+                sm['${se.key}'] =
+                    l.map((x) => (x as num?)?.toInt() ?? 0).toList();
+              }
+            }
+          }
+          out['${pe.key}'] = sm;
+        }
+      }
+      return out;
+    }
+
+    return CricsheetDeltaMatch(
+      matchId: '${j['matchId'] ?? ''}',
+      date: '${j['date'] ?? ''}',
+      format: '${j['format'] ?? ''}',
+      venue: '${j['venue'] ?? ''}',
+      league: '${j['league'] ?? ''}',
+      teamA: '${j['teamA'] ?? ''}',
+      teamB: '${j['teamB'] ?? ''}',
+      bat: scopes(j['bat']),
+      bowl: scopes(j['bowl']),
+    );
+  }
+}
+
+/// The delta store: finished matches since the base asset, keyed by
+/// match id (dedupe lives here — one entry per id, ever), plus
+/// pending ids (match id -> date first seen, '' when unknown) for
+/// finished matches whose scorecard never arrived.
+class CricsheetDelta {
+  final Map<String, CricsheetDeltaMatch> matches;
+  final Map<String, String> pending;
+
+  CricsheetDelta({required this.matches, required this.pending});
+
+  factory CricsheetDelta.empty() =>
+      CricsheetDelta(matches: {}, pending: {});
+
+  bool get isEmpty => matches.isEmpty && pending.isEmpty;
+  Set<String> get processedIds => matches.keys.toSet();
+  Set<String> get pendingIds => pending.keys.toSet();
+
+  Map<String, dynamic> toJson() => {
+        'version': 1,
+        'matches': matches.map((k, v) => MapEntry(k, v.toJson())),
+        'pending': pending,
+      };
+
+  factory CricsheetDelta.fromJson(Map<String, dynamic> j) {
+    final matches = <String, CricsheetDeltaMatch>{};
+    final raw = j['matches'];
+    if (raw is Map) {
+      for (final e in raw.entries) {
+        if (e.value is Map<String, dynamic>) {
+          matches['${e.key}'] =
+              CricsheetDeltaMatch.fromJson(e.value);
+        }
+      }
+    }
+    final pending = <String, String>{};
+    final pr = j['pending'];
+    if (pr is Map) {
+      for (final e in pr.entries) {
+        pending['${e.key}'] = '${e.value ?? ''}';
+      }
+    }
+    return CricsheetDelta(matches: matches, pending: pending);
+  }
+}
+
+/// Per-scope batting accumulator for one delta match.
+class _DeltaBatAcc {
+  int matches = 0;
+  int innings = 0;
+  int runs = 0;
+  int balls = 0;
+  int fours = 0;
+  int sixes = 0;
+  int dismissals = 0;
+  final Map<int, int> innRuns = {};
+
+  List<int> emit() {
+    var fifties = 0;
+    var hundreds = 0;
+    var highest = 0;
+    for (final r in innRuns.values) {
+      if (r >= 100) {
+        hundreds += 1;
+      } else if (r >= 50) {
+        fifties += 1;
+      }
+      if (r > highest) highest = r;
+    }
+    return [
+      matches,
+      innings,
+      runs,
+      balls,
+      fours,
+      sixes,
+      dismissals,
+      fifties,
+      hundreds,
+      highest,
+    ];
+  }
+}
+
+/// Per-scope bowling accumulator for one delta match.
+class _DeltaBowlAcc {
+  int matches = 0;
+  int innings = 0;
+  int wickets = 0;
+  int balls = 0;
+  int runs = 0;
+  final Map<int, int> innWkts = {};
+  final Map<int, int> innRuns = {};
+
+  List<int> emit() {
+    var five = 0;
+    var bestW = 0;
+    var bestR = 0;
+    for (final e in innWkts.entries) {
+      if (e.value >= 5) five += 1;
+      final r = innRuns[e.key] ?? 0;
+      if (e.value > bestW || (e.value == bestW && r < bestR)) {
+        bestW = e.value;
+        bestR = r;
+      }
+    }
+    return [matches, innings, wickets, balls, runs, five, bestW, bestR];
   }
 }
 
