@@ -195,7 +195,8 @@ class PlayerProfileScreen extends StatelessWidget {
           ],
           if (fmt != null && fmt.matches > 0) ...[
             PremiumSectionHeader(
-                title: '${lang.t('format_wise')} — $format',
+                title:
+                    '${lang.t('format_wise')} — ${DisplayText.formatLabel(format!)}',
                 icon: Icons.category_outlined),
             _grid([
               StatCard(label: lang.t('runs'), value: '${fmt.runs}'),
@@ -250,7 +251,7 @@ class PlayerProfileScreen extends StatelessWidget {
             for (final f in player.recentForm)
               _tableRow(
                   f.matchLabel,
-                  '${f.opponent} • ${f.format} • ${f.result} • ${f.wickets > 0 ? '${f.wickets} wkts' : '${f.runs} (${f.balls})'}'),
+                  '${f.opponent} • ${DisplayText.formatLabel(f.format)} • ${f.result} • ${f.wickets > 0 ? '${f.wickets} wkts' : '${f.runs} (${f.balls})'}'),
           ],
           if (player.matchups.isNotEmpty) ...[
             PremiumSectionHeader(
@@ -329,8 +330,8 @@ class PlayerProfileScreen extends StatelessWidget {
             final isDemo = player.source == 'demo';
             final label = isReal
                 ? (player.sourceMatches > 0
-                    ? 'Real • Cricsheet • 420 matches • ${player.sourceMatches} for this player'
-                    : 'Real • Cricsheet • 420 matches')
+                    ? 'Real • Cricsheet • ${player.sourceMatches} matches for this player'
+                    : 'Real • Cricsheet')
                 : isDemo
                     ? 'Demo data — curated sample, not live-verified'
                     : 'Partial • provider basic profile — not fully verified';
@@ -544,7 +545,9 @@ class _FormatTablesState extends State<_FormatTables> {
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: ChoiceChip(
-                  label: Text(f),
+                  // Chip label is display-only; the raw key stays
+                  // the filter value, so 'odi' data still matches.
+                  label: Text(DisplayText.formatLabel(f)),
                   selected: selected,
                   onSelected: (_) => setState(() => _format = f),
                 ),
@@ -582,75 +585,89 @@ class _FormatTablesState extends State<_FormatTables> {
 
   Widget _battingTable(
       List<MapEntry<String, BattingStats>> entries) {
+    // FIX UX: the old 700-wide table straddled the phone viewport,
+    // so the SR column was cut mid-digit at scroll position 0.
+    // Narrower columns put FORMAT/M/Runs/Avg/SR fully on screen
+    // (292dp incl. row padding < ~332dp viewport) and the remaining
+    // columns scroll with 16dp of breathing room at the end.
     return KingGradientCard(
       padding: EdgeInsets.zero,
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.only(right: 16),
         child: SizedBox(
-          width: 700,
+          width: 428,
           child: Column(
             children: [
               const ScoreRow(
                 cells: [
                   SizedBox(
-                      width: 90,
+                      width: 72,
                       child: Text('FORMAT',
                           style: TextStyle(
                               color: AppTheme.goldLight,
                               fontSize: 11,
                               fontWeight: FontWeight.w900))),
-                  ScoreHeaderCell('M', width: 48),
-                  ScoreHeaderCell('Runs', width: 72),
-                  ScoreHeaderCell('Avg', width: 64),
-                  ScoreHeaderCell('SR', width: 64),
-                  ScoreHeaderCell('100s', width: 56),
-                  ScoreHeaderCell('50s', width: 56),
-                  ScoreHeaderCell('HS', width: 56),
+                  ScoreHeaderCell('M', width: 40),
+                  ScoreHeaderCell('Runs', width: 60),
+                  ScoreHeaderCell('Avg', width: 52),
+                  ScoreHeaderCell('SR', width: 52),
+                  ScoreHeaderCell('100s', width: 44),
+                  ScoreHeaderCell('50s', width: 44),
+                  ScoreHeaderCell('HS', width: 48),
                 ],
               ),
               for (final e in entries)
                 ScoreRow(
                   cells: [
                     SizedBox(
-                        width: 90,
-                        child: Text(e.key,
+                        width: 72,
+                        child: Text(DisplayText.formatLabel(e.key),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                                fontWeight: FontWeight.w700))),
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13))),
                     SizedBox(
-                        width: 48,
+                        width: 40,
                         child: Text('${e.value.matches}',
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 72,
+                        width: 60,
                         child: Text('${e.value.runs}',
                             textAlign: TextAlign.right,
                             style: const TextStyle(
                                 fontWeight: FontWeight.w900,
+                                fontSize: 13,
                                 color: AppTheme.goldLight))),
                     SizedBox(
-                        width: 64,
+                        width: 52,
                         child: Text(
                             _rate(e.value.average, e.value.matches > 0),
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 64,
+                        width: 52,
                         child: Text(
                             _rate(e.value.strikeRate, e.value.matches > 0),
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 56,
+                        width: 44,
                         child: Text('${e.value.hundreds}',
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 56,
+                        width: 44,
                         child: Text('${e.value.fifties}',
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 56,
+                        width: 48,
                         child: Text('${e.value.highest}',
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                   ],
                 ),
             ],
@@ -662,79 +679,91 @@ class _FormatTablesState extends State<_FormatTables> {
 
   Widget _bowlingTable(
       List<MapEntry<String, BowlingStats>> entries) {
+    // FIX UX: same viewport-straddle fix as batting — first five
+    // columns (FORMAT/M/Wkts/Avg/Econ = 280dp incl. row padding)
+    // fit fully at scroll position 0; rest scrolls with room.
     return KingGradientCard(
       padding: EdgeInsets.zero,
       child: SingleChildScrollView(
         scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.only(right: 16),
         child: SizedBox(
-          width: 620,
+          width: 432,
           child: Column(
             children: [
               const ScoreRow(
                 cells: [
                   SizedBox(
-                      width: 90,
+                      width: 72,
                       child: Text('FORMAT',
                           style: TextStyle(
                               color: AppTheme.goldLight,
                               fontSize: 11,
                               fontWeight: FontWeight.w900))),
-                  ScoreHeaderCell('M', width: 48),
-                  ScoreHeaderCell('Wkts', width: 56),
-                  ScoreHeaderCell('Avg', width: 64),
-                  ScoreHeaderCell('Econ', width: 64),
-                  ScoreHeaderCell('SR', width: 64),
-                  ScoreHeaderCell('Best', width: 72),
-                  ScoreHeaderCell('5w', width: 48),
+                  ScoreHeaderCell('M', width: 40),
+                  ScoreHeaderCell('Wkts', width: 48),
+                  ScoreHeaderCell('Avg', width: 52),
+                  ScoreHeaderCell('Econ', width: 52),
+                  ScoreHeaderCell('SR', width: 52),
+                  ScoreHeaderCell('Best', width: 60),
+                  ScoreHeaderCell('5w', width: 40),
                 ],
               ),
               for (final e in entries)
                 ScoreRow(
                   cells: [
                     SizedBox(
-                        width: 90,
-                        child: Text(e.key,
+                        width: 72,
+                        child: Text(DisplayText.formatLabel(e.key),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                                fontWeight: FontWeight.w700))),
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13))),
+                    SizedBox(
+                        width: 40,
+                        child: Text('${e.value.matches}',
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
                         width: 48,
-                        child: Text('${e.value.matches}',
-                            textAlign: TextAlign.right)),
-                    SizedBox(
-                        width: 56,
                         child: Text('${e.value.wickets}',
                             textAlign: TextAlign.right,
                             style: const TextStyle(
                                 fontWeight: FontWeight.w900,
+                                fontSize: 13,
                                 color: AppTheme.goldLight))),
                     SizedBox(
-                        width: 64,
+                        width: 52,
                         child: Text(
                             _rate(e.value.average, e.value.wickets > 0),
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 64,
+                        width: 52,
                         child: Text(
                             _rate(e.value.economy, e.value.balls > 0,
                                 digits: 2),
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 64,
+                        width: 52,
                         child: Text(
                             _rate(e.value.strikeRate, e.value.wickets > 0),
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 72,
+                        width: 60,
                         child: Text(e.value.best,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                     SizedBox(
-                        width: 48,
+                        width: 40,
                         child: Text('${e.value.fiveWickets}',
-                            textAlign: TextAlign.right)),
+                            textAlign: TextAlign.right,
+                            style: const TextStyle(fontSize: 13))),
                   ],
                 ),
             ],
