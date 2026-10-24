@@ -165,6 +165,11 @@ void main() {
         const Scaffold(body: PlayerProfileScreen(player: _demo)),
       ));
       await tester.pump();
+      // FINAL MERGE: Squad S moved the source line into the About
+      // section at the bottom — scroll there before asserting.
+      await tester.fling(
+          find.byType(ListView), const Offset(0, -5000), 10000);
+      await tester.pumpAndSettle();
       expect(find.textContaining('Demo data'), findsOneWidget);
       expect(find.text('Complete'), findsNothing);
     });
