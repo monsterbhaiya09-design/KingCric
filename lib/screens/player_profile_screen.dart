@@ -59,83 +59,15 @@ class PlayerProfileScreen extends StatelessWidget {
                               style: const TextStyle(
                                   fontSize: 24,
                                   fontWeight: FontWeight.w900)),
-                          const SizedBox(height: 3),
-                          // Identity: only non-empty parts, joined —
-                          // never a trailing "•" when team/country is missing.
-                          Builder(builder: (_) {
-                            final parts = [
-                              player.role,
-                              player.team,
-                              player.country
-                            ].where((s) => s.trim().isNotEmpty).toList();
-                            if (parts.isEmpty) return const SizedBox.shrink();
-                            return Text(parts.join(' • '),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    color: AppTheme.textSecondary,
-                                    fontSize: 13));
-                          }),
-                          const SizedBox(height: 3),
-                          // Styles: hidden entirely when both are empty —
-                          // never "Batting:  • Bowling: ".
-                          Builder(builder: (_) {
-                            final parts = <String>[];
-                            if (player.battingStyle.trim().isNotEmpty) {
-                              parts.add('Batting: ${player.battingStyle}');
-                            }
-                            if (player.bowlingStyle.trim().isNotEmpty) {
-                              parts.add('Bowling: ${player.bowlingStyle}');
-                            }
-                            if (parts.isEmpty) return const SizedBox.shrink();
-                            return Text(parts.join(' • '),
-                                maxLines: 2,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                    color: AppTheme.textSecondary,
-                                    fontSize: 12));
-                          }),
+                          // Identity + source live in the ABOUT
+                          // section at the bottom (STATS first,
+                          // ABOUT second) — the hero keeps only the
+                          // name and the quick-stat strip.
                         ],
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
-                // ONE source line, directly under the hero identity
-                // (spec P-P2). Never a bare "Complete": Cricsheet
-                // states its dataset size, demo says Demo, anything
-                // else is Partial — a curated number is never
-                // presented as a verified full career.
-                Builder(builder: (_) {
-                  final isReal = player.source == 'cricsheet';
-                  final isDemo = player.source == 'demo';
-                  final label = isReal
-                      ? (player.sourceMatches > 0
-                          ? 'Real • Cricsheet open data • ${player.sourceMatches} matches in dataset'
-                          : 'Real • Cricsheet open data')
-                      : isDemo
-                          ? 'Demo data — curated sample, not live-verified'
-                          : 'Partial • provider basic profile — not fully verified';
-                  final icon = isReal
-                      ? Icons.verified
-                      : isDemo
-                          ? Icons.sports_cricket
-                          : Icons.hourglass_top;
-                  final color = isReal ? AppTheme.green : AppTheme.amber;
-                  return Row(
-                    children: [
-                      Icon(icon, size: 16, color: color),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(label,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontSize: 12)),
-                      ),
-                    ],
-                  );
-                }),
-                const SizedBox(height: 12),
                 // Hero quick stats — always visible, no truncation.
                 Row(
                   children: [
@@ -164,22 +96,13 @@ class PlayerProfileScreen extends StatelessWidget {
               ],
             ),
           ),
-          // Match context: prediction when opened from a match
-          // (opponent known). Venue is optional — an empty venueId
-          // just scores the venue input as "no data", never crashes.
-          if (opponent != null) ...[
-            const PremiumSectionHeader(
-                title: 'Who will fire? — King Prediction',
-                subtitle:
-                    'Form + vs Opponent + Venue + Matchup + Pitch • Model, not a guarantee',
-                icon: Icons.psychology_outlined),
-            PredictionCard(
-                prediction: PredictionEngine.predict(
-                    player: player,
-                    opponent: opponent!,
-                    venueId: venueId ?? '',
-                    format: format ?? 'T20')),
-          ],
+          // ---- STATS (first) ----
+          // Every stats section below comes from loaded real data;
+          // a section with no data is hidden, never a fake row.
+          const PremiumSectionHeader(
+              title: 'Stats',
+              subtitle: 'Career, format, opponent, venue, form',
+              icon: Icons.bar_chart_outlined),
           const PremiumSectionHeader(
               title: 'Overall — All Formats',
               subtitle: 'Career totals, every format combined',
@@ -289,20 +212,26 @@ class PlayerProfileScreen extends StatelessWidget {
                   'Bowling • $format',
                   '${player.bowlingByFormat[format]!.wickets} wkts • Econ ${player.bowlingByFormat[format]!.economy.toStringAsFixed(2)} • Avg ${player.bowlingByFormat[format]!.average.toStringAsFixed(1)}'),
           ],
-          const PremiumSectionHeader(
-              title: 'All Formats — Full Table',
-              subtitle: 'Swipe sideways to see every column',
-              icon: Icons.table_chart_outlined),
-          // Batting + Bowling tables with format chips (spec §4.3:
-          // Bowling by Format sits right after Batting, not at the
-          // bottom of the screen).
-          _FormatTables(player: player),
+          // All-formats table: hidden entirely when the player
+          // has no per-format data at all — a header plus two
+          // "no data" lines is noise, not a section.
+          if (player.battingByFormat.isNotEmpty ||
+              player.bowlingByFormat.isNotEmpty) ...[
+            const PremiumSectionHeader(
+                title: 'All Formats — Full Table',
+                subtitle: 'Swipe sideways to see every column',
+                icon: Icons.table_chart_outlined),
+            // Batting + Bowling tables with format chips (spec §4.3:
+            // Bowling by Format sits right after Batting, not at the
+            // bottom of the screen).
+            _FormatTables(player: player),
+          ],
           if (player.battingByLeague.isNotEmpty) ...[
             const PremiumSectionHeader(
                 title: 'Leagues', icon: Icons.emoji_events_outlined),
             for (final e in player.battingByLeague.entries)
               _tableRow(e.key,
-                  '${e.value.runs} runs • Avg ${e.value.average.toStringAsFixed(1)} • SR ${e.value.strikeRate.toStringAsFixed(1)}'),
+                  '${e.value.runs} runs • Avg ${_rate(e.value.average, e.value.matches > 0)} • SR ${_rate(e.value.strikeRate, e.value.matches > 0)}'),
           ],
           if (player.battingByVenue.isNotEmpty) ...[
             PremiumSectionHeader(
@@ -311,7 +240,7 @@ class PlayerProfileScreen extends StatelessWidget {
                 icon: Icons.stadium_outlined),
             for (final e in player.battingByVenue.entries)
               _tableRow(e.key,
-                  '${e.value.runs} runs • Avg ${e.value.average.toStringAsFixed(1)} • SR ${e.value.strikeRate.toStringAsFixed(1)}'),
+                  '${e.value.runs} runs • Avg ${_rate(e.value.average, e.value.matches > 0)} • SR ${_rate(e.value.strikeRate, e.value.matches > 0)}'),
           ],
           // Recent Form: hidden when empty — no header for
           // a section with no rows (spec P-P3).
@@ -344,14 +273,93 @@ class PlayerProfileScreen extends StatelessWidget {
                 icon: Icons.history),
             for (final d in player.dismissalHistory) _tableRow(d, ''),
           ],
+          // ---- PREDICTION (match context, after stats) ----
+          // When opened from a match (opponent known). Venue is
+          // optional — an empty venueId just scores the venue
+          // input as "no data", never crashes.
+          if (opponent != null) ...[
+            const PremiumSectionHeader(
+                title: 'Who will fire? — King Prediction',
+                subtitle:
+                    'Form + vs Opponent + Venue + Matchup + Pitch • Model, not a guarantee',
+                icon: Icons.psychology_outlined),
+            PredictionCard(
+                prediction: PredictionEngine.predict(
+                    player: player,
+                    opponent: opponent!,
+                    venueId: venueId ?? '',
+                    format: format ?? 'T20')),
+          ],
+          // ---- ABOUT (second, after all stats) ----
+          // Identity + provenance only: team, role, country,
+          // styles, source line. Never a bare "Complete":
+          // Cricsheet states its dataset size, demo says Demo,
+          // anything else is Partial.
+          const PremiumSectionHeader(
+              title: 'About', icon: Icons.person_outline),
+          Builder(builder: (_) {
+            final rows = <MapEntry<String, String>>[];
+            if (player.team.trim().isNotEmpty) {
+              rows.add(MapEntry('Team', player.team));
+            }
+            if (player.role.trim().isNotEmpty) {
+              rows.add(MapEntry('Role', player.role));
+            }
+            if (player.country.trim().isNotEmpty) {
+              rows.add(MapEntry('Country', player.country));
+            }
+            if (player.battingStyle.trim().isNotEmpty) {
+              rows.add(MapEntry('Batting style', player.battingStyle));
+            }
+            if (player.bowlingStyle.trim().isNotEmpty) {
+              rows.add(MapEntry('Bowling style', player.bowlingStyle));
+            }
+            if (rows.isEmpty) {
+              return const Text('No profile details available yet.',
+                  style: TextStyle(
+                      color: AppTheme.textSecondary, fontSize: 13));
+            }
+            return Column(
+              children: [for (final r in rows) _tableRow(r.key, r.value)],
+            );
+          }),
+          const SizedBox(height: 8),
+          Builder(builder: (_) {
+            final isReal = player.source == 'cricsheet';
+            final isDemo = player.source == 'demo';
+            final label = isReal
+                ? (player.sourceMatches > 0
+                    ? 'Real • Cricsheet • 420 matches • ${player.sourceMatches} for this player'
+                    : 'Real • Cricsheet • 420 matches')
+                : isDemo
+                    ? 'Demo data — curated sample, not live-verified'
+                    : 'Partial • provider basic profile — not fully verified';
+            final icon = isReal
+                ? Icons.verified
+                : isDemo
+                    ? Icons.sports_cricket
+                    : Icons.hourglass_top;
+            final color = isReal ? AppTheme.green : AppTheme.amber;
+            return Row(
+              children: [
+                Icon(icon, size: 16, color: color),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(label,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 12)),
+                ),
+              ],
+            );
+          }),
           const SizedBox(height: 20),
         ],
       ),
     );
   }
 
-  Widget _heroStat(String label, String value) {
-    return Container(
+  Widget _heroStat(String label, String value) {    return Container(
       padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
       decoration: BoxDecoration(
         color: Colors.white.withValues(alpha: 0.08),
@@ -483,6 +491,11 @@ class PlayerProfileScreen extends StatelessWidget {
     );
   }
 }
+
+/// Rate display: a rate over zero matches / wickets / balls is
+/// undefined, not zero — show '—', never a fake "0.0".
+String _rate(double v, bool hasData, {int digits = 1}) =>
+    hasData ? v.toStringAsFixed(digits) : '—';
 
 /// Batting + Bowling tables with format chips (spec §4.3).
 /// Chips filter BOTH tables: 'All' = every format row, otherwise only
@@ -619,12 +632,12 @@ class _FormatTablesState extends State<_FormatTables> {
                     SizedBox(
                         width: 64,
                         child: Text(
-                            e.value.average.toStringAsFixed(1),
+                            _rate(e.value.average, e.value.matches > 0),
                             textAlign: TextAlign.right)),
                     SizedBox(
                         width: 64,
                         child: Text(
-                            e.value.strikeRate.toStringAsFixed(1),
+                            _rate(e.value.strikeRate, e.value.matches > 0),
                             textAlign: TextAlign.right)),
                     SizedBox(
                         width: 56,
@@ -699,16 +712,18 @@ class _FormatTablesState extends State<_FormatTables> {
                     SizedBox(
                         width: 64,
                         child: Text(
-                            e.value.average.toStringAsFixed(1),
-                            textAlign: TextAlign.right)),
-                    SizedBox(
-                        width: 64,
-                        child: Text(e.value.economy.toStringAsFixed(2),
+                            _rate(e.value.average, e.value.wickets > 0),
                             textAlign: TextAlign.right)),
                     SizedBox(
                         width: 64,
                         child: Text(
-                            e.value.strikeRate.toStringAsFixed(1),
+                            _rate(e.value.economy, e.value.balls > 0,
+                                digits: 2),
+                            textAlign: TextAlign.right)),
+                    SizedBox(
+                        width: 64,
+                        child: Text(
+                            _rate(e.value.strikeRate, e.value.wickets > 0),
                             textAlign: TextAlign.right)),
                     SizedBox(
                         width: 72,
