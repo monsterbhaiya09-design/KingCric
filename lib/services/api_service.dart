@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/match.dart';
+import '../models/innings.dart';
 import '../models/player.dart';
 import '../models/venue.dart';
 import '../utils/constants.dart';
@@ -189,9 +190,42 @@ class ApiService {
       return Future.value(_cricsheetInjected);
     }
     _cricsheetFuture ??= _loadCricsheetSample
-        ? CricsheetService.loadBundled()
+        ? CricsheetService.loadBundled().then((cs) {
+            // MERGE D: persisted delta loads WITHOUT blocking
+            // service construction — awaiting SharedPreferences
+            // here hangs widget-test fake async (and would stall
+            // first paint on a slow device). The delta mutates
+            // the same service instance, so every later squad /
+            // profile load includes it; the in-memory finish
+            // path (apply + persist) is immediate regardless.
+            unawaited(cs.loadPersistedDelta());
+            return cs;
+          })
         : Future.value(CricsheetService.empty());
     return _cricsheetFuture!;
+  }
+
+  /// MERGE D: finished-match delta wiring — called from the
+  /// AutoUpdateService finish listener (main.dart). Converts the
+  /// finished scorecard into per-player increments on top of the
+  /// bundled aggregates and persists them. Never throws.
+  Future<void> applyFinishedMatchDelta(CricketMatch detail) async {
+    try {
+      final cs = await _cricsheet();
+      if (cs.applyFinishedMatch(detail) == DeltaApplyResult.applied) {
+        await cs.persistDelta();
+      }
+    } catch (_) {}
+  }
+
+  /// MERGE D: honest coverage label for UI ("Full archive
+  /// 2001–2026 • 9943 matches" when aggregates loaded).
+  Future<String> get cricsheetCoverageLabel async {
+    try {
+      return (await _cricsheet()).aggregateCoverageLabel;
+    } catch (_) {
+      return '';
+    }
   }
 
   /// How many Cricsheet matches back the player profiles (0 = sample
@@ -608,12 +642,16 @@ class ApiService {
     final all = await fetchMatches(forceRefresh: forceRefresh);
     for (final m in all) {
       if (m.id == matchId) {
+        // SQUAD SC: the list entry carries totals but no innings —
+        // attach the labelled partial scorecard instead of handing
+        // the tab an empty innings list.
+        final partial = withPartialScorecard(m);
         _detailCache[matchId] = _CacheEntry<CricketMatch>(
-          m,
+          partial,
           DateTime.now().add(AppConstants.liveCacheTtl),
           lastSource,
         );
-        return m;
+        return partial;
       }
     }
     return null;
@@ -633,7 +671,11 @@ class ApiService {
     final future = _fetchScorecardUncached(matchId);
     _scorecardInFlight[matchId] = future;
     try {
-      final result = await future;
+      final fetched = await future;
+      // SQUAD SC: a live match with totals but no innings must never
+      // reach the tab empty — attach a labelled partial scorecard
+      // (totals per innings + a partial note) before caching.
+      final result = fetched == null ? null : withPartialScorecard(fetched);
       if (result != null) {
         lastDetailUpdated = DateTime.now();
         final ttl = result.status == MatchStatus.completed
@@ -653,6 +695,64 @@ class ApiService {
     }
   }
 
+  /// SQUAD SC — Partial scorecard from live totals. When no provider
+  /// returns innings for a match that HAS meaningful scores (live
+  /// 321/6, finished totals, ...), build one innings per meaningful
+  /// score row: team + total + wickets + overs, empty batting /
+  /// bowling (hidden by the tab's hide-when-empty rule), and a
+  /// [Innings.didNotBatNote] that labels it PARTIAL. The tab then
+  /// shows real totals instead of "Scorecard not available yet".
+  /// Never applied to not-started matches (no meaningful scores) —
+  /// for those, "not available" is the honest answer. Returns [m]
+  /// unchanged when it already has innings or has no scores.
+  static CricketMatch withPartialScorecard(CricketMatch m) {
+    if (m.innings.isNotEmpty) return m;
+    final meaningful = m.scores.where((s) => s.isMeaningful).toList();
+    if (meaningful.isEmpty) return m;
+    var n = 0;
+    final innings = meaningful.map((s) {
+      n++;
+      return Innings(
+        team: s.team,
+        inningsNumber: n,
+        total: s.runs,
+        wickets: s.wickets,
+        overs: s.overs,
+        didNotBatNote: 'Partial scorecard — totals from the live '
+            'feed; full batting/bowling details not provided yet.',
+      );
+    }).toList();
+    return CricketMatch(
+      id: m.id,
+      teamA: m.teamA,
+      teamB: m.teamB,
+      format: m.format,
+      league: m.league,
+      venueId: m.venueId,
+      venueName: m.venueName,
+      startTime: m.startTime,
+      status: m.status,
+      scores: m.scores,
+      result: m.result,
+      toss: m.toss,
+      squadA: m.squadA,
+      squadB: m.squadB,
+      innings: innings,
+      commentary: m.commentary,
+      currentBatter: m.currentBatter,
+      currentBowler: m.currentBowler,
+      lastBall: m.lastBall,
+      teamAWinsH2H: m.teamAWinsH2H,
+      teamBWinsH2H: m.teamBWinsH2H,
+      totalH2H: m.totalH2H,
+      lastUpdated: m.lastUpdated,
+      umpires: m.umpires,
+      matchReferee: m.matchReferee,
+      pitchReport: m.pitchReport,
+      source: m.source,
+    );
+  }
+
   Future<CricketMatch?> _fetchScorecardUncached(String matchId) async {
     for (final p in _providers) {
       if (!p.isConfigured) continue;
@@ -666,6 +766,53 @@ class ApiService {
         continue;
       }
     }
+    // SQUAD SC — FOREIGN-ID FALLBACK: the tapped card's id may
+    // belong to another provider (a backstop copy can win a merge on
+    // richer totals), and no provider accepts another provider's id
+    // — CricAPI answers "failure" for a SportScore id and vice
+    // versa, while SportScore / TheSportsDB scorecards always return
+    // null. Re-resolve the fixture instead: find the tapped entry
+    // in the (cached) match list, then ask each scorecard-capable
+    // provider for ITS OWN list copy of the same fixture
+    // (teams/day/format) and fetch the scorecard with THAT id.
+    // Runs only when the direct id failed everywhere, and only
+    // costs one list call per capable provider.
+    try {
+      final list = await fetchMatches();
+      CricketMatch? target;
+      for (final m in list) {
+        if (m.id == matchId) {
+          target = m;
+          break;
+        }
+      }
+      if (target != null) {
+        for (final p in _providers) {
+          if (!p.isConfigured) continue;
+          if (p is SportScoreProvider || p is TheSportsDbProvider) {
+            continue; // their fetchScorecard always returns null
+          }
+          try {
+            final mine = await p.fetchMatches();
+            if (mine == null) continue;
+            for (final m in mine) {
+              if (m.id.isEmpty || m.id == matchId) continue;
+              if (!MatchMerge.mergeCandidates(target, m,
+                  providerA: target.source, providerB: p.name)) {
+                continue;
+              }
+              final r = await p.fetchScorecard(m.id);
+              if (r != null) {
+                lastSource = p.name;
+                return r;
+              }
+            }
+          } catch (_) {
+            continue;
+          }
+        }
+      }
+    } catch (_) {}
     return null;
   }
 
