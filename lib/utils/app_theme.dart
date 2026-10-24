@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
-/// King theme V2 — PREMIUM: dark navy + royal gold, gradients,
-/// gold borders, deep shadows. No more plain flat cards.
+/// King theme V2 — PREMIUM: dark navy + royal gold used as a thin
+/// accent, soft surfaces, one soft shadow. No thick gold outlines.
 class AppTheme {
   static const Color navy = Color(0xFF0B1026);
   static const Color navyDeep = Color(0xFF070B1D);
@@ -49,24 +49,26 @@ class AppTheme {
     end: Alignment.bottomRight,
   );
 
-  static BoxDecoration premiumCard({bool goldBorder = true, double radius = 18}) {
+  /// Clean modern card (FIX UX): gold is a THIN accent, never a
+  /// thick outline around every card. The old 1.2–1.4px gold
+  /// borders + double glow shadows read as chunky/cartoon; a soft
+  /// navy surface with a hairline border and one soft shadow reads
+  /// premium. [goldBorder] now only tints the hairline gold.
+  static BoxDecoration premiumCard({bool goldBorder = true, double radius = 16}) {
     return BoxDecoration(
       gradient: cardGradient,
       borderRadius: BorderRadius.circular(radius),
       border: Border.all(
-        color: goldBorder ? gold.withValues(alpha: 0.45) : Colors.white12,
-        width: goldBorder ? 1.2 : 1,
+        color: goldBorder
+            ? gold.withValues(alpha: 0.20)
+            : Colors.white.withValues(alpha: 0.08),
+        width: 1,
       ),
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.45),
-          blurRadius: 18,
-          offset: const Offset(0, 8),
-        ),
-        BoxShadow(
-          color: gold.withValues(alpha: 0.08),
-          blurRadius: 24,
-          offset: const Offset(0, 2),
+          color: Colors.black.withValues(alpha: 0.25),
+          blurRadius: 12,
+          offset: const Offset(0, 4),
         ),
       ],
     );
@@ -84,12 +86,14 @@ class AppTheme {
         minimumSize: const Size(0, 48),
       );
 
-  /// Designed empty-state card: navy gradient + soft gold border.
+  /// Designed empty-state card: navy gradient + hairline border
+  /// (FIX UX: was a gold-bordered box; now quiet and clean).
   static BoxDecoration emptyStateDecoration() {
     return BoxDecoration(
       gradient: cardGradient,
-      borderRadius: BorderRadius.circular(18),
-      border: Border.all(color: gold.withValues(alpha: 0.35), width: 1),
+      borderRadius: BorderRadius.circular(16),
+      border: Border.all(
+          color: Colors.white.withValues(alpha: 0.08), width: 1),
     );
   }
 
@@ -99,18 +103,13 @@ class AppTheme {
         begin: Alignment.topLeft,
         end: Alignment.bottomRight,
       ),
-      borderRadius: BorderRadius.circular(20),
-      border: Border.all(color: gold.withValues(alpha: 0.6), width: 1.4),
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: gold.withValues(alpha: 0.30), width: 1),
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withValues(alpha: 0.5),
-          blurRadius: 22,
-          offset: const Offset(0, 10),
-        ),
-        BoxShadow(
-          color: gold.withValues(alpha: 0.18),
-          blurRadius: 32,
-          offset: const Offset(0, 4),
+          color: Colors.black.withValues(alpha: 0.30),
+          blurRadius: 14,
+          offset: const Offset(0, 6),
         ),
       ],
     );
@@ -145,7 +144,8 @@ class AppTheme {
           elevation: 0,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(16),
-            side: BorderSide(color: gold.withValues(alpha: 0.35)),
+            side: BorderSide(
+                color: Colors.white.withValues(alpha: 0.08)),
           ),
         ),
         chipTheme: ChipThemeData(
