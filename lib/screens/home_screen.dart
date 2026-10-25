@@ -157,21 +157,26 @@ class _HomeScreenState extends State<HomeScreen> {
       child: CenteredContent(
         child: ListView(
         physics: const AlwaysScrollableScrollPhysics(),
-        padding: const EdgeInsets.all(14),
+        // FIX HOME v6: slim header — top padding 14→10 so the
+        // first match card starts higher on a phone screen.
+        padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
         children: [
           // Premium header — gold crown + gradient title.
+          // FIX HOME v6: compact hero (was padding 16, 48dp logo,
+          // 22dp title, 2-line tagline ≈ 92dp tall; now ≈ 58dp).
           Container(
-            padding: const EdgeInsets.all(16),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
             decoration: AppTheme.heroCard(),
             child: Row(
               children: [
                 Container(
-                  width: 48,
-                  height: 48,
+                  width: 36,
+                  height: 36,
                   alignment: Alignment.center,
                   decoration: BoxDecoration(
                     color: AppTheme.navyCard2,
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(10),
                     border: Border.all(
                         color: AppTheme.gold.withValues(alpha: 0.40),
                         width: 1),
@@ -184,7 +189,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                   child: const Icon(Icons.workspace_premium,
-                      size: 26, color: AppTheme.goldLight),
+                      size: 20, color: AppTheme.goldLight),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -201,15 +206,15 @@ class _HomeScreenState extends State<HomeScreen> {
                             maxLines: 1,
                             softWrap: false,
                             style: const TextStyle(
-                                fontSize: 22,
+                                fontSize: 18,
                                 fontWeight: FontWeight.w900,
                                 letterSpacing: 0.5)),
                       ),
                       Text(lang.t('tagline'),
-                          maxLines: 2,
+                          maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                              color: AppTheme.goldSoft, fontSize: 12)),
+                              color: AppTheme.goldSoft, fontSize: 11)),
                     ],
                   ),
                 ),
@@ -218,7 +223,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
           ),
-          const SizedBox(height: 14),
+          const SizedBox(height: 8),
           TextField(
             controller: _searchController,
             onChanged: (v) => setState(() => _query = v),
@@ -226,6 +231,16 @@ class _HomeScreenState extends State<HomeScreen> {
             decoration: InputDecoration(
               hintText: lang.t('search_hint'),
               prefixIcon: const Icon(Icons.search, color: AppTheme.goldLight),
+              // FIX HOME v6: the default 48dp prefix-icon box is
+              // what pinned the bar at 48dp; a 40dp box lets the
+              // compact padding actually slim the bar.
+              prefixIconConstraints:
+                  const BoxConstraints(minWidth: 40, minHeight: 40),
+              // FIX HOME v6: compact search bar (was ~56dp tall
+              // with default content padding; now ~44dp).
+              isDense: true,
+              contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12, vertical: 8),
               // Clear button: one tap resets the filter (no dead query).
               suffixIcon: _query.isEmpty
                   ? null
@@ -233,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       button: true,
                       label: lang.isHindi ? 'खोज साफ़ करें' : 'Clear search',
                       child: IconButton(
-                        icon: const Icon(Icons.clear, size: 20),
+                        icon: const Icon(Icons.clear, size: 18),
                         tooltip: lang.isHindi ? 'साफ़ करें' : 'Clear',
                         onPressed: () {
                           _searchController.clear();
@@ -244,19 +259,19 @@ class _HomeScreenState extends State<HomeScreen> {
               filled: true,
               fillColor: AppTheme.navyCard,
               border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide(
                       color: AppTheme.gold.withValues(alpha: 0.35))),
               enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(12),
                   borderSide: BorderSide(
                       color: AppTheme.gold.withValues(alpha: 0.25))),
               focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(14),
+                  borderRadius: BorderRadius.circular(12),
                   borderSide: const BorderSide(color: AppTheme.gold)),
             ),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           // SQUAD B: four banners, four DISTINCT looks — never silent
           // degrade, never two states in the same amber box.
           // (a) No key configured -> demo mode by construction.
@@ -316,7 +331,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(fontSize: 12)),
             ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           // V3 BUG FIX: SegmentedButton wrapped "Upcoming" as
           // "Upcomin g" on narrow screens. Custom tabs with FittedBox
           // scale labels down instead of wrapping them.
@@ -324,7 +339,7 @@ class _HomeScreenState extends State<HomeScreen> {
             filter: _filter,
             onChanged: (v) => setState(() => _filter = v),
           ),
-          const SizedBox(height: 10),
+          const SizedBox(height: 8),
           // Freshness signal (CricketLineX / Cricbuzz pattern):
           // "Last updated + date" + manual Refresh, always visible.
           Row(
@@ -371,9 +386,11 @@ class _HomeScreenState extends State<HomeScreen> {
                           child: ChoiceChip(
                             label: Text(f == 'All' ? lang.t('all') : f),
                             selected: _formatFilter == f,
-                            // G6: 48dp tap target.
+                            // FIX HOME v6: compact chips (~32dp, was
+                            // 48dp with padded tap target) so the
+                            // Matches header starts higher.
                             materialTapTargetSize:
-                                MaterialTapTargetSize.padded,
+                                MaterialTapTargetSize.shrinkWrap,
                             onSelected: (_) =>
                                 setState(() => _formatFilter = f),
                           ),
@@ -490,8 +507,10 @@ class _HomeBanner extends StatelessWidget {
       label: semanticsLabel,
       child: Container(
         width: double.infinity,
-        margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+        // FIX HOME v6: tighter banner (margin bottom 8→6,
+        // vertical padding 10→8).
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
           color: color.withValues(alpha: 0.15),
           borderRadius: BorderRadius.circular(12),
@@ -546,9 +565,10 @@ class _FilterTabs extends StatelessWidget {
                 onTap: () => onChanged(tabs[i].$1),
                 borderRadius: BorderRadius.circular(24),
                 child: Container(
-                  // G6: 48dp tap target (12 vertical padding + text).
+                  // FIX HOME v6: tighter filter tabs (vertical
+                  // padding 12→9, still a comfortable tap target).
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 4, vertical: 12),
+                      horizontal: 4, vertical: 9),
                   decoration: BoxDecoration(
                     color: filter == tabs[i].$1
                         ? AppTheme.gold
