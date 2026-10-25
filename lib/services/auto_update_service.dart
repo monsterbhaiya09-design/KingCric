@@ -124,12 +124,12 @@ class AutoUpdateService {
 
   Future<void> _tickInner() async {
     // forceRefresh: true is REQUIRED here. A plain fetchMatches()
-    // returns the 10-min TTL cache, which makes every poll inside
+    // returns the live TTL cache (3 min), which makes polls inside
     // the TTL window return the SAME list — finish transitions
     // would never be seen and the poller would be a no-op (the
-    // same bug Home had with Refresh). The tick interval already
-    // equals the TTL (10 min), so this costs one call per tick,
-    // exactly the quota the cache was designed around.
+    // same bug Home had with Refresh). The tick interval (10 min)
+    // already exceeds the TTL, so this costs one call per tick,
+    // exactly the quota the poller was designed around.
     final matches = await _api.fetchMatches(forceRefresh: true);
     lastPoll = DateTime.now();
     for (final fn in List.of(_matchesListeners)) {
@@ -203,8 +203,15 @@ class AutoUpdateService {
         return ManualRefreshResult.failure(
             ManualRefreshReason.quotaExhausted);
       }
-      final detail =
-          await _api.fetchMatchDetail(match.id, forceRefresh: true);
+      final detail = await _api.fetchMatchDetail(match.id,
+              forceRefresh: true) ??
+          // MERGE v6: same list-entry rescue the detail screen
+          // uses — a live match whose scorecard endpoint fails must
+          // not report "no data" when the tapped card already
+          // carries real totals; the partial keeps the Update
+          // button working for exactly the 2026-10-25 phone case.
+          await _api.fetchMatchDetailWithListEntry(match.id, match,
+              forceRefresh: true);
       if (detail == null) {
         if (_api.quotaState == QuotaState.quotaExhausted) {
           return ManualRefreshResult.failure(
