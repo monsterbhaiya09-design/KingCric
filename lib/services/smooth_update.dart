@@ -12,7 +12,7 @@ import 'api_service.dart';
 ///     instantly, fetch fresh data in the background, swap it in
 ///     without flicker — never a blank screen, never a full-screen
 ///     spinner on refresh.
-///  2. **Smart polling:** live = 10 min, upcoming/series = 60 min,
+///  2. **Smart polling:** live = 3 min, upcoming/series = 60 min,
 ///     completed = cached forever-ish (finished data never changes).
 ///  3. **Deduplication:** the same in-flight request is shared, so
 ///     two screens asking for the same match burn one quota hit.
