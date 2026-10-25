@@ -133,8 +133,8 @@ New quota-safe policy (enforced in code, not just docs):
 
 | What | Interval | Calls/day (worst case) |
 |---|---|---|
-| Live match list | **10 min** cache + manual Refresh | ~60 if the app ran 10 h straight |
-| Live match detail / scorecard | **10 min** cache | shares the same budget — detail only for the open match |
+| Live match list | **3 min** cache + manual Refresh | ~60 if the app ran 10 h straight (background poll stays 10 min) |
+| Live match detail / scorecard | **3 min** cache | shares the same budget — detail only for the open match |
 | Completed match detail / scorecard | **60 min** cache (finished data never changes) | ~1 per match, once |
 | Series list | **60 min** cache | ~a few |
 | Match just finished | **+1 extra fetch** (AutoUpdateService fires once on live→completed transition) | +1 per finished match |
@@ -167,7 +167,7 @@ flutter run --dart-define=CRIC_API_KEY=YOUR_FREE_KEY
 
 ## 9. What is NOT ready (honest limits)
 
-- **Live ball-by-ball is 10-min cached**, not sub-second. No free tier
+- **Live ball-by-ball is 3-min cached**, not sub-second. No free tier
   supports faster polling (see §7). Paid tiers / push feeds would be
   needed for true real-time — out of scope for the ₹0 build.
 - **Player career / vs-opponent / venue / matchup stats** now come
