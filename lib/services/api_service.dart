@@ -71,6 +71,37 @@ class _CacheEntry<T> {
 ///   yet (no successful call so far). UI shows no banner.
 enum QuotaState { ok, keyMissing, quotaExhausted, unknown }
 
+/// SQUAD LIVE v6 — why a detail refresh returned null, so the UI can
+/// say the real reason instead of one generic "Could not refresh".
+/// - [quotaExhausted]: a keyed provider reported its daily quota gone.
+/// - [providersDown]: no provider answered with fresh real data at
+///   all (network failure / all endpoints down) — the fallback list
+///   was demo/stale data, which cannot prove anything about this
+///   fixture.
+/// - [endpointEmpty]: providers DID answer with a fresh real list,
+///   but no entry carried this match id and no scorecard endpoint
+///   returned one — the provider simply has no scorecard for this
+///   fixture yet.
+/// - [none]: the last detail fetch succeeded (or none attempted).
+enum DetailFailure { none, quotaExhausted, providersDown, endpointEmpty }
+
+/// SQUAD LIVE v6 — players confirmed on the field from a real
+/// scorecard. This is NOT an official Playing XI: no provider in the
+/// stack exposes an XI list (CricAPI currentMatches / cricketScore
+/// carry no XI; squadA/squadB are full-squad carriers populated
+/// only by mock data), so nothing here is ever labelled "Playing XI"
+/// unless a future provider actually supplies one. [confirmedA] /
+/// [confirmedB] are the players who batted or bowled in a real
+/// innings, in order of first appearance; bench is unknowable from
+/// a scorecard alone and is therefore never listed.
+class MatchLineup {
+  final List<String> confirmedA;
+  final List<String> confirmedB;
+  const MatchLineup({this.confirmedA = const [], this.confirmedB = const []});
+  bool get hasConfirmed =>
+      confirmedA.isNotEmpty || confirmedB.isNotEmpty;
+}
+
 class ApiService {
   final MockDataService _mock = MockDataService();
   final List<CricketProvider> _providers;
@@ -85,6 +116,30 @@ class ApiService {
 
   /// Last provider that successfully answered (debug / UI label).
   String lastSource = 'mock';
+
+  /// SQUAD LIVE v6 — classification of the last detail-fetch
+  /// failure (see [DetailFailure]). Reset to [DetailFailure.none]
+  /// on every successful detail fetch. Screens MUST read this from
+  /// the SAME instance that ran the fetch — ApiService is not a
+  /// singleton, so a fresh ApiService() would always report [none].
+  DetailFailure lastDetailFailure = DetailFailure.none;
+
+  /// User-facing refresh-failure text for [lastDetailFailure].
+  /// Each branch states only a cause the code can actually tell
+  /// apart; the [DetailFailure.none] branch is the generic fallback
+  /// for paths that cannot classify (e.g. an escaped exception).
+  String get detailFailureMessage {
+    switch (lastDetailFailure) {
+      case DetailFailure.quotaExhausted:
+        return 'Daily free quota exhausted — showing last verified data. Quota resets tomorrow.';
+      case DetailFailure.providersDown:
+        return 'Providers did not answer — check your connection; showing last verified data.';
+      case DetailFailure.endpointEmpty:
+        return 'The provider has no scorecard for this match yet — showing last verified data.';
+      case DetailFailure.none:
+        return 'Could not refresh — showing last verified data.';
+    }
+  }
 
   // ---- Smooth updates (stale-while-revalidate, dedup, freshness) ----
   // See smooth_update.dart for the full design. These fields let
@@ -113,8 +168,9 @@ class ApiService {
   }
 
   /// TTL for one match: completed data never changes (60 min cache,
-  /// effectively "never re-fetch"), live/upcoming use the 10-min
-  /// live TTL. Re-fetching a finished scorecard is pure quota waste.
+  /// effectively "never re-fetch"), live/upcoming use the 3-min
+  /// live TTL (SQUAD LIVE v6: was 10 min — a visible part of the
+  /// live lag). Re-fetching a finished scorecard is pure quota waste.
   static Duration ttlForMatch(CricketMatch m) =>
       m.status == MatchStatus.completed
           ? AppConstants.completedCacheTtl
@@ -620,15 +676,42 @@ class ApiService {
     return fresh;
   }
 
+  /// Detail for one match: scorecard endpoint first, then the
+  /// match-list entry as a labelled partial, then null.
+  /// NOTE (SQUAD LIVE v6): the signature is deliberately UNCHANGED
+  /// — an existing test subclass overrides this exact signature,
+  /// and this squad may not touch that file. Callers that hold the
+  /// tapped list entry should use [fetchMatchDetailWithListEntry]
+  /// instead, so a null fetch can still fall back to the entry the
+  /// user already saw.
   Future<CricketMatch?> fetchMatchDetail(String matchId,
-      {bool forceRefresh = false}) async {
+          {bool forceRefresh = false}) =>
+      _fetchMatchDetailImpl(matchId, forceRefresh: forceRefresh);
+
+  /// Same as [fetchMatchDetail], but [listEntry] (the tapped card's
+  /// own match object, totals but no innings) is the last-resort
+  /// fallback: when every provider fails AND the fallback list does
+  /// not contain the fixture, a labelled partial built from the
+  /// entry is returned instead of null.
+  Future<CricketMatch?> fetchMatchDetailWithListEntry(
+          String matchId, CricketMatch listEntry,
+          {bool forceRefresh = false}) =>
+      _fetchMatchDetailImpl(matchId,
+          forceRefresh: forceRefresh, listEntry: listEntry);
+
+  Future<CricketMatch?> _fetchMatchDetailImpl(String matchId,
+      {bool forceRefresh = false, CricketMatch? listEntry}) async {
     if (!forceRefresh) {
       final cached = _detailCache[matchId];
-      if (cached != null && cached.fresh) return cached.value;
+      if (cached != null && cached.fresh) {
+        lastDetailFailure = DetailFailure.none;
+        return cached.value;
+      }
     }
     final viaScorecard = await fetchScorecard(matchId,
         forceRefresh: forceRefresh);
     if (viaScorecard != null) {
+      lastDetailFailure = DetailFailure.none;
       final ttl = viaScorecard.status == MatchStatus.completed
           ? AppConstants.completedCacheTtl
           : AppConstants.liveCacheTtl;
@@ -646,6 +729,7 @@ class ApiService {
         // attach the labelled partial scorecard instead of handing
         // the tab an empty innings list.
         final partial = withPartialScorecard(m);
+        lastDetailFailure = DetailFailure.none;
         _detailCache[matchId] = _CacheEntry<CricketMatch>(
           partial,
           DateTime.now().add(AppConstants.liveCacheTtl),
@@ -653,6 +737,46 @@ class ApiService {
         );
         return partial;
       }
+    }
+    // SQUAD LIVE v6 — LIST-ENTRY FALLBACK (the 2026-10-25 phone
+    // bug): Home showed LIVE UAE 31/0 (6.0 ov) from CricAPI, but
+    // the Scorecard tab said "not started yet". The chain that
+    // produced null: /cricketScore failed for the id (or the key
+    // was quota-capped) AND the fetchMatches fallback could not
+    // find the fixture — a quota-capped run falls back to a demo
+    // list that cannot contain a real fixture id. The screen
+    // ALREADY holds the tapped list entry (totals, no innings);
+    // returning null for it discarded real totals the user had
+    // already seen. A labelled partial built from that entry is
+    // strictly better than null, and the tab then shows totals
+    // instead of "not started". Only cached when it actually adds
+    // innings (meaningful scores); a scoreless entry stays null so
+    // a genuinely not-started match keeps its honest empty state.
+    if (listEntry != null && listEntry.id == matchId) {
+      final partial = withPartialScorecard(listEntry);
+      if (partial.innings.isNotEmpty) {
+        lastDetailFailure = DetailFailure.none;
+        _detailCache[matchId] = _CacheEntry<CricketMatch>(
+          partial,
+          DateTime.now().add(AppConstants.liveCacheTtl),
+          lastSource,
+        );
+        return partial;
+      }
+    }
+    // Classify the null. Order matters: a capped key ALSO yields
+    // empty/demo fallback lists, which must not misreport as
+    // "provider has no scorecard". lastSource == 'mock' means no
+    // fresh provider data at all (all providers empty → demo list,
+    // or stale cache served with lastSource='mock'); a fresh real
+    // list without this id means the endpoint genuinely has no
+    // scorecard for the fixture yet.
+    if (_providers.any((p) => p.isConfigured && p.quotaExhausted)) {
+      lastDetailFailure = DetailFailure.quotaExhausted;
+    } else if (lastFetchWasMock) {
+      lastDetailFailure = DetailFailure.providersDown;
+    } else {
+      lastDetailFailure = DetailFailure.endpointEmpty;
     }
     return null;
   }
@@ -665,7 +789,7 @@ class ApiService {
       final inFlight = _scorecardInFlight[matchId];
       if (inFlight != null) return inFlight;
     }
-    // Cache the fetched scorecard (completed = 60 min, live = 10 min)
+    // Cache the fetched scorecard (completed = 60 min, live = 3 min)
     // so repeated opens of the same match do NOT burn quota, and
     // concurrent callers share one request.
     final future = _fetchScorecardUncached(matchId);
@@ -751,6 +875,57 @@ class ApiService {
       pitchReport: m.pitchReport,
       source: m.source,
     );
+  }
+
+  /// SQUAD LIVE v6 — confirmed-on-field lineup from a real
+  /// scorecard. Cricket-correct grouping: an innings' BATTING rows
+  /// belong to the innings team, its BOWLING rows belong to the
+  /// OTHER team (the fielding side) — grouping bowlers under the
+  /// batting side would put a Netherlands bowler in a UAE lineup.
+  /// Team matching is case-insensitive name equality against
+  /// [m.teamA]/[m.teamB]; an innings whose team matches NEITHER
+  /// side is skipped entirely, never guessed into a side. A
+  /// batting or bowling row with an empty name is skipped. Order
+  /// is first appearance across innings.
+  /// Deliberately NOT derived from [CricketMatch.squadA]/[squadB]:
+  /// those are full squads, not XIs, and presenting a squad (or a
+  /// squad minus confirmed players) as "Bench" would invent a
+  /// bench the provider never stated. Bench is therefore always
+  /// unknown here — the screen says so instead of listing names.
+  /// A totals-only partial scorecard (no batting/bowling rows)
+  /// yields an empty lineup: totals alone never prove who played.
+  static MatchLineup lineupForMatch(CricketMatch m) {
+    final confirmedA = <String>[];
+    final confirmedB = <String>[];
+    void add(List<String> list, String name) {
+      final n = name.trim();
+      if (n.isEmpty || list.contains(n)) return;
+      list.add(n);
+    }
+
+    final a = m.teamA.trim().toLowerCase();
+    final b = m.teamB.trim().toLowerCase();
+    for (final inn in m.innings) {
+      final team = inn.team.trim().toLowerCase();
+      List<String>? battersSide;
+      List<String>? bowlersSide;
+      if (team.isNotEmpty && team == a) {
+        battersSide = confirmedA;
+        bowlersSide = confirmedB;
+      } else if (team.isNotEmpty && team == b) {
+        battersSide = confirmedB;
+        bowlersSide = confirmedA;
+      } else {
+        continue;
+      }
+      for (final bat in inn.batting) {
+        add(battersSide, bat.playerName);
+      }
+      for (final bowl in inn.bowling) {
+        add(bowlersSide, bowl.playerName);
+      }
+    }
+    return MatchLineup(confirmedA: confirmedA, confirmedB: confirmedB);
   }
 
   Future<CricketMatch?> _fetchScorecardUncached(String matchId) async {
