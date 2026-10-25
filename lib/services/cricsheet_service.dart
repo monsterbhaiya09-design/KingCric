@@ -678,8 +678,15 @@ class CricsheetService {
   /// 'cs-...' ids squadForTeams assigns. Previously only the 44
   /// hard-coded [_identities] resolved, so the other ~1,800 players
   /// in the 420-match dataset were invisible to every query.
+  /// Provider full names that do NOT match any key exactly are
+  /// resolved by [_resolveName] (Squad DATA v6): normalised exact
+  /// match, token-set equality ("Muhammad Waseem" ->
+  /// "Waseem Muhammad"), then last-name + first-initial + middle
+  /// tokens ("Rahul Chopra" -> "R Chopra", "Max O'Dowd" ->
+  /// "MP O'Dowd", "Bas de Leede" -> "B de Leede"), with team
+  /// disambiguation when [resolveShortNameForTeam] is used.
   /// Returns null when unknown. The last-name fallback stays
-  /// restricted to [_identities] — over 1,847 names it would
+  /// restricted to [_identities] — over 8,331 names it would
   /// otherwise pick the wrong player.
   String? resolveShortName(String query) {
     final q = query.trim();
@@ -697,12 +704,206 @@ class CricsheetService {
     }
     // Exact short name anywhere in the loaded dataset.
     if (_index.knownShorts.contains(q)) return q;
-    // Last-name fallback: "Kohli" -> "V Kohli" (identities only).
-    final last = q.split(' ').last.toLowerCase();
-    for (final e in _identities.entries) {
-      if (e.key.toLowerCase().endsWith(last)) return e.key;
+    // Provider-name resolution over the full key space.
+    final resolved = _resolveName(q);
+    if (resolved != null) return resolved;
+    // Last-name fallback, SINGLE-TOKEN queries only: "Kohli" ->
+    // "V Kohli" (identities only). A multi-token query that
+    // _resolveName left unresolved is ambiguous or unknown by
+    // judgement (e.g. "Arun Sharma" over several Sharmas) and
+    // must stay null — falling back here used to return an
+    // arbitrary same-last-name identity ("RG Sharma").
+    if (!q.contains(' ')) {
+      final last = q.toLowerCase();
+      for (final e in _identities.entries) {
+        if (e.key.toLowerCase().endsWith(last)) return e.key;
+      }
     }
     return null;
+  }
+
+  /// Resolve a provider name -> Cricsheet short name, requiring the
+  /// player to belong to [team] (base-name equality, as in
+  /// [_sameTeam]). A name that matches only another team's player
+  /// returns null — a wrong-team player is never returned. Use this
+  /// whenever the calling context knows the player's team (squad
+  /// members, XI lookups); [resolveShortName] without a team
+  /// returns null for ambiguous names instead of guessing.
+  String? resolveShortNameForTeam(String query, String team) {
+    final q = query.trim();
+    if (q.isEmpty) return null;
+    if (_identities.containsKey(q)) {
+      final t = _teamOf(q);
+      if (t.isEmpty || _sameTeam(t, team)) return q;
+      return null;
+    }
+    for (final e in _identities.entries) {
+      if (e.value.id == q ||
+          e.value.displayName.toLowerCase() == q.toLowerCase()) {
+        final t = _teamOf(e.key);
+        if (t.isEmpty || _sameTeam(t, team)) return e.key;
+        return null;
+      }
+    }
+    return _resolveName(q, team: team);
+  }
+
+  /// Normalised name form for resolution: lowercase, apostrophes /
+  /// periods removed, hyphens split, whitespace collapsed.
+  /// "O'Dowd" -> "odowd" on both sides, so provider and Cricsheet
+  /// spellings compare equal.
+  static String _normName(String s) => s
+      .toLowerCase()
+      .replaceAll(RegExp(r"[’'.]"), '')
+      .replaceAll('-', ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
+  static bool _tokensEqual(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  /// Provider-name -> Cricsheet key over the union of aggregate
+  /// keys and sample short names. Steps, in order:
+  /// 1. normalised exact match;
+  /// 2. token-multiset equality (handles swapped token order);
+  /// 3. last token + first initial + middle tokens equal.
+  /// With [team] given, candidates from other teams are dropped;
+  /// if none remain, null (never a wrong-team player). Without a
+  /// team, more than one candidate is ambiguous -> null. With a
+  /// team and several same-team candidates, the tie-break is:
+  /// shortest first token ("B de Leede" over "BFW de Leede" for
+  /// "Bas de Leede"), then most career matches, then name.
+  /// Trailing parentheticals ("(c)", "(wk)") are ignored.
+  String? _resolveName(String query, {String? team}) {
+    final cleaned =
+        query.replaceAll(RegExp(r'\s*\([^)]*\)'), ' ').trim();
+    if (cleaned.isEmpty) return null;
+    final idx = _nameIndex;
+    final nq = _normName(cleaned);
+    if (nq.isEmpty) return null;
+    String? teamOf(String key) => idx.teamByKey[key];
+    bool teamOk(String key) {
+      if (team == null) return true;
+      final t = teamOf(key);
+      return t != null && t.isNotEmpty && _sameTeam(t, team);
+    }
+
+    // 1. Normalised exact match.
+    final exact = idx.exact[nq];
+    if (exact != null) {
+      if (team == null || teamOk(exact)) return exact;
+      return null;
+    }
+    final qt = nq.split(' ');
+    if (qt.length < 2) return null;
+    final qSorted = [...qt]..sort();
+    // 2. Token-multiset equality.
+    for (final e in idx.exact.entries) {
+      final kt = e.key.split(' ');
+      if (kt.length != qt.length) continue;
+      final kSorted = [...kt]..sort();
+      if (!_tokensEqual(kSorted, qSorted)) continue;
+      if (team == null || teamOk(e.value)) return e.value;
+      return null;
+    }
+    // 3. Last token + first initial + middle tokens.
+    final last = qt.last;
+    final firstInit = qt.first[0];
+    final qMid = qt.sublist(1, qt.length - 1)..sort();
+    final passing = <_NameCandidate>[];
+    for (final c in idx.byLast[last] ?? const <_NameCandidate>[]) {
+      final kt = _normName(c.key).split(' ');
+      if (kt.length < 2) continue;
+      if (kt.first[0] != firstInit) continue;
+      final kMid = kt.sublist(1, kt.length - 1)..sort();
+      if (!_tokensEqual(kMid, qMid)) continue;
+      passing.add(c);
+    }
+    if (passing.isEmpty) return null;
+    if (team != null) {
+      final pool =
+          passing.where((c) => teamOk(c.key)).toList();
+      if (pool.isEmpty) return null;
+      if (pool.length == 1) return pool.single.key;
+      pool.sort((a, b) {
+        final fa = _normName(a.key).split(' ').first.length;
+        final fb = _normName(b.key).split(' ').first.length;
+        if (fa != fb) return fa.compareTo(fb);
+        if (a.matches != b.matches) {
+          return b.matches.compareTo(a.matches);
+        }
+        return a.key.compareTo(b.key);
+      });
+      return pool.first.key;
+    }
+    return passing.length == 1 ? passing.single.key : null;
+  }
+
+  _NameIndex? _nameIndexCache;
+  _NameIndex get _nameIndex => _nameIndexCache ??= _buildNameIndex();
+
+  _NameIndex _buildNameIndex() {
+    final exact = <String, String>{};
+    final byLast = <String, List<_NameCandidate>>{};
+    final teamByKey = <String, String>{};
+    void add(String key, String team, int matches) {
+      final n = _normName(key);
+      if (exact.containsKey(n)) return;
+      exact[n] = key;
+      teamByKey[key] = team;
+      final toks = n.split(' ');
+      if (toks.length < 2) return;
+      final list = byLast[toks.last] ??= <_NameCandidate>[];
+      if (!list.any((c) => c.key == key)) {
+        list.add(_NameCandidate(key, team, matches));
+      }
+    }
+
+    final agg = aggregate;
+    if (agg != null) {
+      for (final e in agg.players.entries) {
+        final batAll = e.value.bat['all'];
+        final bowlAll = e.value.bowl['all'];
+        final m = batAll != null && batAll.isNotEmpty
+            ? batAll[0]
+            : (bowlAll != null && bowlAll.isNotEmpty ? bowlAll[0] : 0);
+        add(e.key, e.value.team, m);
+      }
+    }
+    for (final s in _index.knownShorts) {
+      add(s, _teamOf(s), _index.playerXiMatches[s]?.length ?? 0);
+    }
+    return _NameIndex(exact, byLast, teamByKey);
+  }
+
+  /// Aggregate squad membership for one team: Cricsheet keys of
+  /// players whose aggregate team matches [team], ranked by career
+  /// XI matches (descending), capped at [limit]. This is the
+  /// aggregate-side complement to [squadForTeams] (which ranks
+  /// from the sample index): it covers associate teams thinly
+  /// represented in the 420-match sample but fully present in the
+  /// 9,943-match archive. Callers that need full [Player] objects
+  /// map these keys through [playerByShortName].
+  List<String> aggregateSquadKeysForTeam(String team, {int limit = 50}) {
+    final agg = aggregate;
+    if (agg == null) return const [];
+    final keys = agg.players.entries
+        .where((e) => _sameTeam(e.value.team, team))
+        .toList();
+    keys.sort((a, b) {
+      final am = a.value.bat['all'];
+      final bm = b.value.bat['all'];
+      final av = am != null && am.isNotEmpty ? am[0] : 0;
+      final bv = bm != null && bm.isNotEmpty ? bm[0] : 0;
+      if (av != bv) return bv.compareTo(av);
+      return a.key.compareTo(b.key);
+    });
+    return keys.take(limit).map((e) => e.key).toList();
   }
 
   _Identity? _identityFor(String shortName) => _identities[shortName];
@@ -1203,6 +1404,12 @@ class CricsheetService {
   }
 
   Player? playerByShortName(String shortName) {
+    // Provider names reach this entry point too (scorecard XI
+    // rows, squad builders): resolve them to the Cricsheet key
+    // first, so a provider name never silently yields null while
+    // the player is in the data. Already-short names resolve to
+    // themselves, so resolved lookups are unaffected.
+    shortName = resolveShortName(shortName) ?? shortName;
     final idx = _index;
     final aggPlayer = aggregate?.players[shortName];
     final inSample = idx.knownShorts.contains(shortName);
@@ -1547,14 +1754,76 @@ class CricsheetService {
     return entries;
   }
 
+  /// Archive team names (from the aggregate players' teams and
+  /// the H2H index keys), for mapping a provider team name to its
+  /// Cricsheet form. Null when the archive knows no such team.
+  Set<String>? _aggregateTeamsCache;
+  Set<String> get _aggregateTeams {
+    if (_aggregateTeamsCache != null) return _aggregateTeamsCache!;
+    final teams = <String>{};
+    final agg = aggregate;
+    if (agg != null) {
+      for (final e in agg.players.values) {
+        if (e.team.isNotEmpty) teams.add(e.team);
+      }
+      for (final k in agg.h2h.keys) {
+        final parts = k.split('|');
+        if (parts.length >= 2) {
+          teams.add(parts[0]);
+          teams.add(parts[1]);
+        }
+      }
+    }
+    return _aggregateTeamsCache = teams;
+  }
+
+  String? _aggregateTeamKey(String teamName) {
+    final base = _baseTeamName(teamName);
+    final teams = _aggregateTeams;
+    if (teams.contains(base)) return base;
+    for (final t in teams) {
+      if (_sameTeam(t, base)) return t;
+    }
+    return null;
+  }
+
   /// Team H2H: {matches, teamAWins, teamBWins, noResult}.
   /// Optional [format] restricts to one format ('ODI', 'T20',
   /// ...). Optional [gender] restricts to men's / women's
   /// meetings — pass it whenever the calling match knows its
   /// gender, otherwise men's and women's meetings are pooled
   /// (legacy behaviour, kept for callers without match context).
+  /// AGGREGATE FIRST (Squad DATA v6): the full-archive H2H index
+  /// answers from 9,943 matches; the old sample loop (420
+  /// matches) runs only when the index has no entry — e.g. a team
+  /// the archive does not know, or a meeting newer than the base.
+  /// Aggregate and sample are NEVER summed (the archive is the
+  /// sample's superset).
   Map<String, int> teamH2H(String teamA, String teamB,
       {String? format, String? gender}) {
+    final agg = aggregate;
+    if (agg != null && agg.h2h.isNotEmpty) {
+      final a = _aggregateTeamKey(teamA);
+      final b = _aggregateTeamKey(teamB);
+      if (a != null && b != null) {
+        final sorted = [a, b]..sort();
+        final fmt = format == null ? 'ALL' : normalizeFormat(format);
+        final gen = gender ?? 'ALL';
+        final v = agg.h2h['${sorted[0]}|${sorted[1]}|$fmt|$gen'];
+        if (v != null && v.length >= 4) {
+          // Index wins are stored for the sorted-first team.
+          final aIsFirst = _sameTeam(a, sorted[0]);
+          return {
+            'matches': v[0],
+            'teamAWins': aIsFirst ? v[1] : v[2],
+            'teamBWins': aIsFirst ? v[2] : v[1],
+            'noResult': v[3],
+          };
+        }
+        // Key missing: fall through to the sample loop, which can
+        // still catch meetings newer than the archive base.
+      }
+    }
     var played = 0;
     var aWins = 0;
     var bWins = 0;
@@ -1646,13 +1915,82 @@ class CricsheetService {
     return out;
   }
 
+  /// Best aggregate venue entry for [venueName]: exact match
+  /// first, else the highest Jaccard token overlap over the venue
+  /// index (>= 0.5; ties break by more matches, then name).
+  /// Jaccard (not the sample's containment rule) is used so
+  /// "ICC Academy Ground, Dubai" matches "ICC Academy, Dubai"
+  /// (3/4) ahead of "ICC Academy Ground No 2, Dubai" (4/6) —
+  /// the No 2 ground is a different ground, not the same venue.
+  /// Returns the venue key + entry, or null when nothing matches.
+  MapEntry<String, CricsheetAggVenue>? _findAggregateVenue(
+      String venueName) {
+    final agg = aggregate;
+    if (agg == null || agg.venues.isEmpty) return null;
+    if (agg.venues.containsKey(venueName)) {
+      return MapEntry(venueName, agg.venues[venueName]!);
+    }
+    final qNorm = _normVenue(venueName);
+    if (qNorm.isEmpty) return null;
+    for (final e in agg.venues.entries) {
+      if (_normVenue(e.key) == qNorm) return e;
+    }
+    final qToks = qNorm.split(' ').toSet();
+    MapEntry<String, CricsheetAggVenue>? best;
+    var bestScore = 0.0;
+    var bestMatches = -1;
+    for (final e in agg.venues.entries) {
+      final vToks = _normVenue(e.key).split(' ').toSet();
+      final inter = qToks.intersection(vToks).length;
+      final union = qToks.union(vToks).length;
+      if (union == 0) continue;
+      final score = inter / union;
+      if (score < 0.5) continue;
+      if (score > bestScore ||
+          (score == bestScore && e.value.matches > bestMatches)) {
+        best = e;
+        bestScore = score;
+        bestMatches = e.value.matches;
+      }
+    }
+    return best;
+  }
+
   /// Venue stats computed from bundled matches at [venueName]
   /// (fuzzy match: "Rawalpindi Cricket Stadium, Rawalpindi" matches
   /// the dataset's "Rawalpindi Cricket Stadium"). Null when no
   /// bundled match was played there. Pitch / weather are NOT in
   /// Cricsheet — the Venue tab keeps "Not available from free
   /// providers yet" for those, never faked.
+  /// AGGREGATE FIRST (Squad DATA v6): the full-archive venue
+  /// index answers from 9,943 matches (the old sample loop said
+  /// "Matches at venue 1" for grounds with dozens of archive
+  /// matches). The sample loop runs only when the index has no
+  /// entry. Aggregate and sample are NEVER summed.
   VenueStats? venueStats(String venueName, {String? gender}) {
+    final agg = aggregate;
+    if (agg != null && agg.venues.isNotEmpty) {
+      final found = _findAggregateVenue(venueName);
+      if (found != null) {
+        final entry = found.value;
+        final totals =
+            gender != null ? entry.byGender[gender] : null;
+        if (gender == null || totals != null) {
+          final t = totals ?? entry;
+          return VenueStats(
+            venue: entry.venue,
+            city: entry.city,
+            matches: t.matches,
+            avgFirstInnings: t.avgFirst,
+            avgSecondInnings: t.avgSecond,
+            highestTotal: t.highest,
+            batFirstWinPct: t.batFirstWinPct,
+          );
+        }
+        // Venue exists only for the other gender: fall through to
+        // the sample loop, which can only add newer meetings.
+      }
+    }
     final matched = matches
         .where((m) =>
             _venueMatches(m.venue, venueName) &&
@@ -1722,6 +2060,153 @@ class CricsheetService {
     final inter = at.intersection(bt).length;
     final minLen = at.length < bt.length ? at.length : bt.length;
     return minLen > 0 && inter / minLen >= 0.75;
+  }
+
+  /// One player's record AT one venue, for the Venue tab's
+  /// "players at this venue" section (Squad DATA v6 — the service
+  /// method; the tab UI belongs to another squad). Batting and
+  /// bowling lines keep SEPARATE match counts (a player may bat
+  /// without bowling at a venue and vice versa); nothing is
+  /// averaged across the two. Base = full-archive ven: scope for
+  /// the resolved venue key; finished-match deltas dated after
+  /// the base add their ven: scopes on top (same base+delta rule
+  /// as profiles — deltas are never part of the base, so adding
+  /// them cannot double-count). Null when the player has no
+  /// innings at the venue in either source, or when the player /
+  /// venue cannot be resolved — never zero-filled. The venue
+  /// scope pick is exact-then-fuzzy over the player's OWN
+  /// ven: scopes (base and delta alike), because per-match
+  /// Cricsheet venue strings ("ICC Academy") need not equal the
+  /// venue-index key ("ICC Academy, Dubai").
+  PlayerVenueStats? playerVenueStats(String player, String venue,
+      {String? team}) {
+    final short = team == null
+        ? resolveShortName(player)
+        : resolveShortNameForTeam(player, team);
+    if (short == null) return null;
+    final found = _findAggregateVenue(venue);
+    if (found == null) return null;
+    final venueKey = found.key;
+    final aggPlayer = aggregate?.players[short];
+    // Per-player ven: scopes use the Cricsheet venue string of
+    // each match, which need not equal the venue-index key: the
+    // index key "ICC Academy, Dubai" and a player's scope
+    // "ven:ICC Academy" are the same ground. So the pick is exact
+    // first, then the best Jaccard match (>= 0.5) over THAT
+    // PLAYER's own ven: scopes — never a global venue merge.
+    List<int>? pick(Map<String, List<int>> scopes) {
+      final exact = scopes['ven:$venueKey'];
+      if (exact != null) return exact;
+      String? bestKey;
+      var bestScore = 0.0;
+      final qToks = _normVenue(venueKey).split(' ').toSet();
+      for (final k in scopes.keys) {
+        if (!k.startsWith('ven:')) continue;
+        final vToks = _normVenue(k.substring(4)).split(' ').toSet();
+        final inter = qToks.intersection(vToks).length;
+        final union = qToks.union(vToks).length;
+        if (union == 0) continue;
+        final score = inter / union;
+        if (score >= 0.5 && score > bestScore) {
+          bestScore = score;
+          bestKey = k;
+        }
+      }
+      return bestKey == null ? null : scopes[bestKey];
+    }
+
+    List<int>? bat =
+        aggPlayer == null ? null : pick(aggPlayer.bat);
+    List<int>? bowl =
+        aggPlayer == null ? null : pick(aggPlayer.bowl);
+    final d = _deltaScopesFor(short);
+    final dBat = pick(d.bat);
+    final dBowl = pick(d.bowl);
+    List<int>? add(List<int>? a, List<int>? b) {
+      if (a == null) return b;
+      if (b == null) return a;
+      final out = List<int>.of(a);
+      for (var i = 0; i < b.length && i < out.length; i++) {
+        if (i == 9) {
+          if (b[i] > out[i]) out[i] = b[i];
+        } else {
+          out[i] += b[i];
+        }
+      }
+      return out;
+    }
+
+    bat = add(bat, dBat);
+    bowl = add(bowl, dBowl);
+    if (bat == null && bowl == null) return null;
+    int at(List<int>? a, int i) =>
+        a != null && i < a.length ? a[i] : 0;
+    final runs = at(bat, 2);
+    final balls = at(bat, 3);
+    final dismissals = at(bat, 6);
+    final wkts = at(bowl, 2);
+    final bowlBalls = at(bowl, 3);
+    final rc = at(bowl, 4);
+    return PlayerVenueStats(
+      shortName: short,
+      team: aggPlayer?.team ?? _teamOf(short),
+      battingMatches: at(bat, 0),
+      runs: runs,
+      balls: balls,
+      average: dismissals > 0
+          ? runs / dismissals
+          : (at(bat, 1) > 0 ? runs.toDouble() : 0),
+      strikeRate: balls > 0 ? runs * 100 / balls : 0,
+      bowlingMatches: at(bowl, 0),
+      wickets: wkts,
+      economy: bowlBalls > 0 ? rc * 6 / bowlBalls : 0,
+    );
+  }
+
+  /// Venue records for a list of players (e.g. one team's squad
+  /// members). Unresolvable players and players with no innings
+  /// at the venue are skipped silently — the caller renders only
+  /// returned rows, never invented ones. Pass [team] when all
+  /// names belong to one team (wrong-team lookalikes are then
+  /// excluded by [resolveShortNameForTeam]).
+  List<PlayerVenueStats> venuePlayers(List<String> players,
+      String venue,
+      {String? team}) {
+    final out = <PlayerVenueStats>[];
+    for (final p in players) {
+      final s = playerVenueStats(p, venue, team: team);
+      if (s != null) out.add(s);
+    }
+    return out;
+  }
+
+  /// Top batters / bowlers at a venue from the aggregate venue
+  /// index (all-gender top 10s, truncated to [limit]). Empty
+  /// when the venue is not in the index. Teams come from the
+  /// aggregate players map ('' when the short is unknown there).
+  VenueLeaders topPlayersAtVenue(String venue, {int limit = 10}) {
+    final found = _findAggregateVenue(venue);
+    if (found == null) {
+      return const VenueLeaders(batters: [], bowlers: []);
+    }
+    VenueTopPlayer toPlayer(VenueTopEntry e, bool batting) =>
+        VenueTopPlayer(
+          shortName: e.short,
+          team: aggregate?.players[e.short]?.team ?? '',
+          runs: batting ? e.value : 0,
+          wickets: batting ? 0 : e.value,
+          matches: e.matches,
+        );
+    return VenueLeaders(
+      batters: found.value.topBatters
+          .take(limit)
+          .map((e) => toPlayer(e, true))
+          .toList(),
+      bowlers: found.value.topBowlers
+          .take(limit)
+          .map((e) => toPlayer(e, false))
+          .toList(),
+    );
   }
 
   /// Ball-level data for ONE bundled match between [teamA] and
@@ -1936,6 +2421,116 @@ class CricsheetAggPlayer {
   }
 }
 
+/// Venue totals from the full-archive venue index
+/// (tools/aggregate_cricsheet.py). Same definitions as the sample
+/// [VenueStats]: innings totals summed from deliveries, bat-first
+/// win = winner == first-innings batting team.
+class CricsheetAggVenueTotals {
+  final int matches;
+  final double avgFirst;
+  final double avgSecond;
+  final int highest;
+  final double batFirstWinPct;
+  const CricsheetAggVenueTotals({
+    required this.matches,
+    required this.avgFirst,
+    required this.avgSecond,
+    required this.highest,
+    required this.batFirstWinPct,
+  });
+
+  factory CricsheetAggVenueTotals.fromJson(Map<String, dynamic> j) {
+    double d(Object? v) => (v as num?)?.toDouble() ?? 0;
+    int i(Object? v) => (v as num?)?.toInt() ?? 0;
+    return CricsheetAggVenueTotals(
+      matches: i(j['matches']),
+      avgFirst: d(j['avgFirst']),
+      avgSecond: d(j['avgSecond']),
+      highest: i(j['highest']),
+      batFirstWinPct: d(j['batFirstWinPct']),
+    );
+  }
+}
+
+/// One top-player line from the venue index: [short, value, matches]
+/// where value is runs (batters) or wickets (bowlers).
+class VenueTopEntry {
+  final String short;
+  final int value;
+  final int matches;
+  const VenueTopEntry({
+    required this.short,
+    required this.value,
+    required this.matches,
+  });
+}
+
+/// One venue from the full-archive venue index. Totals are
+/// all-gender; [byGender] carries the male/female totals splits
+/// when the venue hosted that gender. Top players are all-gender
+/// (player ven: scopes carry no gender split).
+class CricsheetAggVenue extends CricsheetAggVenueTotals {
+  final String venue;
+  final String city;
+  final List<VenueTopEntry> topBatters;
+  final List<VenueTopEntry> topBowlers;
+  final Map<String, CricsheetAggVenueTotals> byGender;
+  const CricsheetAggVenue({
+    required this.venue,
+    required this.city,
+    required super.matches,
+    required super.avgFirst,
+    required super.avgSecond,
+    required super.highest,
+    required super.batFirstWinPct,
+    required this.topBatters,
+    required this.topBowlers,
+    required this.byGender,
+  });
+
+  factory CricsheetAggVenue.fromJson(String venue, Map<String, dynamic> j) {
+    List<VenueTopEntry> tops(Object? v) {
+      final out = <VenueTopEntry>[];
+      if (v is List) {
+        for (final e in v) {
+          if (e is List && e.length >= 3) {
+            out.add(VenueTopEntry(
+              short: '${e[0]}',
+              value: (e[1] as num?)?.toInt() ?? 0,
+              matches: (e[2] as num?)?.toInt() ?? 0,
+            ));
+          }
+        }
+      }
+      return out;
+    }
+
+    final byGender = <String, CricsheetAggVenueTotals>{};
+    final bg = j['byGender'];
+    if (bg is Map) {
+      for (final e in bg.entries) {
+        if (e.value is Map<String, dynamic>) {
+          byGender['${e.key}'] =
+              CricsheetAggVenueTotals.fromJson(e.value);
+        }
+      }
+    }
+    final t = CricsheetAggVenueTotals.fromJson(j);
+    return CricsheetAggVenue(
+      venue: venue,
+      city: '${j['city'] ?? ''}',
+      matches: t.matches,
+      avgFirst: t.avgFirst,
+      avgSecond: t.avgSecond,
+      highest: t.highest,
+      batFirstWinPct: t.batFirstWinPct,
+      topBatters: tops(j['topBatters']),
+      topBowlers: tops(j['topBowlers']),
+      byGender: byGender,
+    );
+  }
+}
+
 /// FULL-ARCHIVE aggregate document (assets/cricsheet_stats.json).
 /// Never throws on parse: malformed input yields an empty aggregate
 /// and callers fall back to the sample.
@@ -1950,12 +2545,26 @@ class CricsheetAggregate {
   final String coverageEnd;
   final Map<String, CricsheetAggPlayer> players;
 
+  /// H2H index (tools/aggregate_cricsheet.py): key
+  /// "teamA|teamB|fmt|gender" with teamA/teamB SORTED
+  /// alphabetically, so value[1] is always the sorted-first
+  /// team's wins. Value: [matches, firstWins, secondWins,
+  /// noResult]. fmt is Test/ODI/T20/T10 or ALL; gender is
+  /// male/female or ALL. Empty when the asset predates the index.
+  final Map<String, List<int>> h2h;
+
+  /// Venue index (tools/aggregate_cricsheet.py): venue string ->
+  /// entry. Empty when the asset predates the index.
+  final Map<String, CricsheetAggVenue> venues;
+
   const CricsheetAggregate({
     required this.matchCount,
     required this.yearMin,
     required this.yearMax,
     required this.coverageEnd,
     required this.players,
+    this.h2h = const {},
+    this.venues = const {},
   });
 
   factory CricsheetAggregate.parse(String jsonText) {
@@ -1981,12 +2590,38 @@ class CricsheetAggregate {
           }
         }
       }
+      final h2h = <String, List<int>>{};
+      final rawH2h = decoded['h2h'];
+      if (rawH2h is Map) {
+        for (final e in rawH2h.entries) {
+          if (e.value is List) {
+            // Explicit <int> type argument: through a dynamic
+            // receiver, .map().toList() would otherwise produce
+            // List<dynamic>, which fails the List<int> check.
+            h2h['${e.key}'] = (e.value as List)
+                .map<int>((x) => (x as num?)?.toInt() ?? 0)
+                .toList();
+          }
+        }
+      }
+      final venues = <String, CricsheetAggVenue>{};
+      final rawVenues = decoded['venues'];
+      if (rawVenues is Map) {
+        for (final e in rawVenues.entries) {
+          if (e.value is Map<String, dynamic>) {
+            venues['${e.key}'] =
+                CricsheetAggVenue.fromJson('${e.key}', e.value);
+          }
+        }
+      }
       return CricsheetAggregate(
         matchCount: (metaMap['matches'] as num?)?.toInt() ?? 0,
         yearMin: '${metaMap['yearMin'] ?? ''}',
         yearMax: '${metaMap['yearMax'] ?? ''}',
         coverageEnd: '${metaMap['coverageEnd'] ?? ''}',
         players: players,
+        h2h: h2h,
+        venues: venues,
       );
     } catch (_) {
       return const CricsheetAggregate(
@@ -2219,6 +2854,59 @@ class VenueStats {
   });
 }
 
+/// One player's record at one venue (see [CricsheetService.
+/// playerVenueStats]). Batting and bowling match counts are kept
+/// separate — a player who only batted (or only bowled) at a venue
+/// has 0 on the other line, never a merged count.
+class PlayerVenueStats {
+  final String shortName;
+  final String team;
+  final int battingMatches;
+  final int runs;
+  final int balls;
+  final double average;
+  final double strikeRate;
+  final int bowlingMatches;
+  final int wickets;
+  final double economy;
+  const PlayerVenueStats({
+    required this.shortName,
+    required this.team,
+    required this.battingMatches,
+    required this.runs,
+    required this.balls,
+    required this.average,
+    required this.strikeRate,
+    required this.bowlingMatches,
+    required this.wickets,
+    required this.economy,
+  });
+}
+
+/// One line of a venue leaderboard: runs is set for batters,
+/// wickets for bowlers, the other is 0.
+class VenueTopPlayer {
+  final String shortName;
+  final String team;
+  final int runs;
+  final int wickets;
+  final int matches;
+  const VenueTopPlayer({
+    required this.shortName,
+    required this.team,
+    required this.runs,
+    required this.wickets,
+    required this.matches,
+  });
+}
+
+/// Venue leaderboard pair (see [CricsheetService.topPlayersAtVenue]).
+class VenueLeaders {
+  final List<VenueTopPlayer> batters;
+  final List<VenueTopPlayer> bowlers;
+  const VenueLeaders({required this.batters, required this.bowlers});
+}
+
 /// One-pass index over the loaded matches. Split keys:
 /// 'all', 'fmt:<Format>', 'opp:<Team>', 'ven:<Venue>', 'lg:<League>'.
 class _CsIndex {
@@ -2238,6 +2926,26 @@ class _CsIndex {
   final Set<String> knownShorts = {};
   final Set<String> venues = {};
   final Set<String> leagues = {};
+}
+
+/// One candidate for provider-name resolution: the Cricsheet key,
+/// its team (aggregate team, else first sample team), and its
+/// career XI-match count (tie-break only).
+class _NameCandidate {
+  final String key;
+  final String team;
+  final int matches;
+  const _NameCandidate(this.key, this.team, this.matches);
+}
+
+/// Lazily built name-resolution index over the union of aggregate
+/// keys and sample short names. [exact] maps a normalised name to
+/// its key; [byLast] maps a normalised last token to candidates.
+class _NameIndex {
+  final Map<String, String> exact;
+  final Map<String, List<_NameCandidate>> byLast;
+  final Map<String, String> teamByKey;
+  const _NameIndex(this.exact, this.byLast, this.teamByKey);
 }
 
 class _BatAgg {
