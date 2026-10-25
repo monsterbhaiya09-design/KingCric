@@ -31,7 +31,7 @@ thousands of players for a small gain and is reported as skipped.
 
 Output: assets/cricsheet_stats.json
   { "meta": {matches, yearMin, yearMax, generated, source,
-             inputs: [...]},
+             inputs: [...], indexes: ["h2h", "venues"]},
     "players": { shortName: {
         "team": first team seen,
         "m": XI matches (career),
@@ -43,7 +43,25 @@ Output: assets/cricsheet_stats.json
                            bestRuns] },
         "dis": { "line": count },
         "pairs": { bowlerShort: [matches, balls, runs, dismissals] }
-    } } }
+    } },
+    "h2h": { "teamA|teamB|fmt|gender": [matches, aWins, bWins,
+        noResult] },
+      teamA/teamB are the two Cricsheet team names SORTED
+      alphabetically, so aWins always belongs to the sorted-first
+      team (callers map back). fmt is Test/ODI/T20/T10 or ALL;
+      gender is male/female (info.gender) or ALL. Every match
+      increments 4 keys: (fmt,gender), (fmt,ALL), (ALL,gender),
+      (ALL,ALL). Ties and no-results count as noResult.
+    "venues": { venue: {city, matches, avgFirst, avgSecond,
+        highest, batFirstWinPct,
+        topBatters: [[short, runs, matches], ...] (top 10),
+        topBowlers: [[short, wickets, matches], ...] (top 10),
+        byGender: {male|female: {matches, avgFirst, avgSecond,
+            highest, batFirstWinPct}} } }
+      Venue totals use the same definitions as the Dart sample
+      venueStats (innings totals summed from deliveries, bat-first
+      win = winner == first innings batting team). Top players are
+      all-gender (player ven: scopes carry no gender split). }
 Scopes: "all", "fmt:Test|ODI|T20|T10", "opp:<team>", "ven:<venue>",
 "lg:<league>". A bat/bowl scope is emitted only when the player has
 an innings in it (except bat "all", which is always emitted so the
@@ -176,6 +194,20 @@ def main():
     meta_matches = 0
     years = []
     dates_seen = []
+    # H2H index: (teamSorted0, teamSorted1, fmt, gender) -> counts.
+    h2h = defaultdict(lambda: [0, 0, 0, 0])
+    # Venue totals: (venue, genderOrALL) -> running totals.
+    ven_tot = {}
+
+    def ven_acc(venue, gender):
+        key = (venue, gender)
+        a = ven_tot.get(key)
+        if a is None:
+            a = {"matches": 0, "firstSum": 0, "firstCount": 0,
+                 "secondSum": 0, "secondCount": 0, "highest": 0,
+                 "batFirstWins": 0, "decided": 0, "city": ""}
+            ven_tot[key] = a
+        return a
 
     def player(short):
         p = players.get(short)
@@ -210,6 +242,13 @@ def main():
                 dates_seen.append(str(dates[0])[:10])
             fmt = norm_format(info.get("match_type", ""))
             venue = info.get("venue", "") or ""
+            city = info.get("city", "") or ""
+            gender = info.get("gender", "") or ""
+            winner = (info.get("outcome") or {}).get("winner", "") or ""
+            # Per-match innings totals (delivery sums) for the venue
+            # index; first innings batting team for bat-first wins.
+            inn_totals = {}
+            first_batting = innings[0].get("team", "") if innings else ""
             event = (info.get("event") or {}).get("name", "") or ""
             league = league_for_event(event)
             teams = info.get("teams", []) or []
@@ -243,6 +282,7 @@ def main():
                         byes = extras.get("byes", 0) or 0
                         legbyes = extras.get("legbyes", 0) or 0
                         inn_key = f"{file_id}:{ii}"
+                        inn_totals[ii] = inn_totals.get(ii, 0) + total
                         bat_scopes = ("all", f"fmt:{fmt}",
                                       f"opp:{bowling_team}",
                                       f"ven:{venue}", f"lg:{league}")
@@ -331,6 +371,44 @@ def main():
                         if wkts and wkts[0].get("player_out") == batter \
                                 and wkts[0].get("kind") in BOWLER_CREDITED:
                             pair[3] += 1
+
+            # ---- H2H + venue indexes for this match ----------------
+            # (A missing info.gender contributes only to ALL keys.)
+            genders = (gender, "ALL") if gender else ("ALL",)
+            if len(teams) == 2:
+                t_sorted = sorted(teams)
+                for f2 in (fmt, "ALL"):
+                    for g2 in genders:
+                        c = h2h[(t_sorted[0], t_sorted[1], f2, g2)]
+                        c[0] += 1
+                        if winner == t_sorted[0]:
+                            c[1] += 1
+                        elif winner == t_sorted[1]:
+                            c[2] += 1
+                        else:
+                            c[3] += 1
+            if venue:
+                first = inn_totals.get(0)
+                second = inn_totals.get(1)
+                for g2 in genders:
+                    a = ven_acc(venue, g2)
+                    a["matches"] += 1
+                    if not a["city"] and city:
+                        a["city"] = city
+                    if first is not None:
+                        a["firstSum"] += first
+                        a["firstCount"] += 1
+                        if first > a["highest"]:
+                            a["highest"] = first
+                    if second is not None:
+                        a["secondSum"] += second
+                        a["secondCount"] += 1
+                        if second > a["highest"]:
+                            a["highest"] = second
+                    if winner and first_batting:
+                        a["decided"] += 1
+                        if winner == first_batting:
+                            a["batFirstWins"] += 1
         z.close()
 
     out_players = {}
@@ -359,6 +437,59 @@ def main():
                               for b, v in p["pairs"].items() if v[1] >= 12}
         out_players[short] = entry
 
+    # ---- Venue index: totals + top players per venue -------------
+    # Top players come from the per-player ven: scopes (all-gender);
+    # totals are gender-rolled (ALL + per-gender when present).
+    ven_bat = defaultdict(list)  # venue -> [(short, runs, matches)]
+    ven_bowl = defaultdict(list)  # venue -> [(short, wkts, matches)]
+    for short, p in players.items():
+        for scope, a in p["bat"].items():
+            if scope.startswith("ven:") and a.innings:
+                ven_bat[scope[4:]].append(
+                    (short, a.runs, len(a.matches)))
+        for scope, a in p["bowl"].items():
+            if scope.startswith("ven:") and a.innings:
+                ven_bowl[scope[4:]].append(
+                    (short, a.wickets, len(a.matches)))
+
+    def ven_totals(a):
+        return {
+            "matches": a["matches"],
+            "avgFirst": round(a["firstSum"] / a["firstCount"], 2)
+            if a["firstCount"] else 0,
+            "avgSecond": round(a["secondSum"] / a["secondCount"], 2)
+            if a["secondCount"] else 0,
+            "highest": a["highest"],
+            "batFirstWinPct": round(a["batFirstWins"] * 100 / a["decided"], 1)
+            if a["decided"] else 0,
+        }
+
+    out_venues = {}
+    for (venue, g), a in ven_tot.items():
+        if g != "ALL":
+            continue
+        entry = ven_totals(a)
+        entry["city"] = a["city"]
+        entry["topBatters"] = [
+            [s, r, m] for s, r, m in sorted(
+                ven_bat.get(venue, []),
+                key=lambda t: (-t[1], -t[2], t[0]))[:10]]
+        entry["topBowlers"] = [
+            [s, w, m] for s, w, m in sorted(
+                ven_bowl.get(venue, []),
+                key=lambda t: (-t[1], -t[2], t[0]))[:10]]
+        by_gender = {}
+        for g2 in ("male", "female"):
+            ga = ven_tot.get((venue, g2))
+            if ga is not None and ga["matches"]:
+                by_gender[g2] = ven_totals(ga)
+        if by_gender:
+            entry["byGender"] = by_gender
+        out_venues[venue] = entry
+
+    out_h2h = {"|".join(k): v for k, v in h2h.items()}
+
+    import datetime
     out = {
         "meta": {
             "matches": meta_matches,
@@ -368,17 +499,21 @@ def main():
             # finished-match deltas dated <= coverageEnd, because
             # a regenerated base already contains those matches.
             "coverageEnd": max(dates_seen) if dates_seen else "",
-            "generated": "2026-10-24",
+            "generated": datetime.date.today().isoformat(),
             "source": "Cricsheet open data (cricsheet.org)",
             "inputs": [z.rsplit("/", 1)[-1] for z in args.zips],
             "scope": "men's + women's internationals, Test/ODI/T20; "
                      "domestic + franchise leagues excluded",
+            "indexes": ["h2h", "venues"],
         },
         "players": out_players,
+        "h2h": out_h2h,
+        "venues": out_venues,
     }
     with open(args.out, "w") as f:
         json.dump(out, f, separators=(",", ":"), sort_keys=True)
     print(f"matches={meta_matches} players={len(out_players)} "
+          f"h2h={len(out_h2h)} venues={len(out_venues)} "
           f"years={min(years) if years else ''}-{max(years) if years else ''}")
 
 
