@@ -75,6 +75,9 @@ class AppConstants {
   /// key before lunch. Live list refreshes every 10 min, idle every
   /// 15 min, plus one manual Refresh and one extra fetch when a match
   /// flips to completed. See API-SETUP.md "Quota budget".
+  /// NOTE: [livePollInterval] (background polling) is NOT the cache
+  /// TTL below — polling stays 10 min; only re-open / manual
+  /// refresh freshness is governed by [liveCacheTtl] (3 min).
   static const Duration livePollInterval = Duration(minutes: 10);
   static const Duration finishedPollInterval = Duration(minutes: 5);
   static const Duration idlePollInterval = Duration(minutes: 15);
@@ -82,7 +85,16 @@ class AppConstants {
   /// Cache TTLs (ApiService). Completed data never changes, so it is
   /// cached far longer than live data — re-fetching a finished
   /// scorecard is pure quota waste.
-  static const Duration liveCacheTtl = Duration(minutes: 10);
+  /// SQUAD LIVE v6: live TTL is 3 min, not 10. The 10-min TTL was a
+  /// visible part of the ~2-over lag on a live match (phone
+  /// screenshot: 31/0 at 6.0 ov while a paid feed showed 38/0 at
+  /// 8.0 ov). Part of that lag is the free provider itself lagging
+  /// paid feeds — no client change can fake that away — but our own
+  /// cache must stop adding up to 10 min on top. Polling is NOT
+  /// raised (livePollInterval stays 10 min); only cache freshness
+  /// on re-open / manual refresh improves, so quota cost stays
+  /// bounded by user action, not by a faster timer.
+  static const Duration liveCacheTtl = Duration(minutes: 3);
   static const Duration completedCacheTtl = Duration(hours: 1);
 
   /// Per-provider daily self-imposed caps (below the provider limits,
