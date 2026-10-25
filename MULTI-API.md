@@ -58,7 +58,7 @@ Secrets: `CRIC_API_KEY`, `ELITESPORT_API_KEY`, `ENTITYSPORT_API_KEY`,
 - EntitySport dev token: sample completed competitions only.
 - TheSportsDB free livescore is delayed; metadata/schedule backstop.
 - SportScore: scores only, no full scorecard; attribution required.
-- Ball-by-ball: 10-min cached, not sub-second (free-tier limit).
+- Ball-by-ball: 3-min cached, not sub-second (free-tier limit).
 - No background-when-closed updates / FCM push yet.
 
 ## Verification
