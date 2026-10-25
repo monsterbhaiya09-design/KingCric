@@ -209,7 +209,14 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   @override
   void initState() {
     super.initState();
-    _match = widget.match;
+    // SQUAD LIVE v6 (belt, part 1): the list entry carries totals
+    // but no innings. If the detail fetch later returns null, the
+    // screen must still never render the scorecard empty branch for
+    // a match with runs on the board — so the entry itself is
+    // partial-ified up front. A not-started entry (no meaningful
+    // scores) passes through unchanged and keeps its honest empty
+    // state; a live entry gains labelled partial innings.
+    _match = ApiService.withPartialScorecard(widget.match);
     // MATCH-CENTRIC tabs: Live/Scorecard | Squad | Venue+H2H | Prediction.
     _tabs = TabController(length: 5, vsync: this);
     _coverageFuture = ApiService().cricsheetCoverageLabel;
@@ -244,7 +251,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
   /// list entry's squad ids (CricAPI /cricketScore returns no squad
   /// list), emptying the Squad tab that was already populated.
   static CricketMatch _mergeDetail(CricketMatch base, CricketMatch detail) {
-    return CricketMatch(
+    final merged = CricketMatch(
       id: base.id,
       teamA: base.teamA,
       teamB: base.teamB,
@@ -289,25 +296,49 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           ? detail.pitchReport
           : base.pitchReport,
     );
+    // SQUAD LIVE v6 (belt, part 2): a detail payload with totals
+    // but no innings (or an empty detail merged over a scored base)
+    // must still never reach the tab empty — partial-ify the merged
+    // result exactly as the service does for its own payloads.
+    return ApiService.withPartialScorecard(merged);
   }
 
   /// Re-fetch this match's full detail (scorecard) on Retry.
   /// Never wipes the current match on failure — the last verified
   /// copy stays on screen with a SnackBar explaining the failure.
+  /// SQUAD LIVE v6: the failure reason is no longer one generic
+  /// line. The SAME ApiService instance that ran the fetch is
+  /// asked for its classified reason (quota / providers-down /
+  /// endpoint-empty — see ApiService.detailFailureMessage), and
+  /// the tapped list entry itself is passed as [listEntry] so a
+  /// null fetch can still fall back to its labelled partial
+  /// instead of leaving the tab empty. Force-refresh (Retry and
+  /// the manual Update button) bypasses BOTH caches: the detail
+  /// cache (fetchMatchDetail forceRefresh) and, inside the
+  /// fallback chain, the list cache (fetchMatches forceRefresh).
+  /// The initState auto-fetch (force: false) still respects the
+  /// 3-min live / 60-min completed TTLs.
   Future<void> _refreshDetail({bool force = true}) async {
     if (_refreshingDetail) return;
     setState(() => _refreshingDetail = true);
     try {
-      final fresh = await ApiService()
-          .fetchMatchDetail(_match.id, forceRefresh: force);
+      final svc = ApiService();
+      final fresh = await svc.fetchMatchDetailWithListEntry(
+          _match.id, _match,
+          forceRefresh: force);
       if (!mounted) return;
       if (fresh != null) {
         setState(() => _match = _mergeDetail(_match, fresh));
       } else {
+        // Belt-and-braces: even when the service returns null, the
+        // screen's own copy may carry totals — partial-ify it so
+        // the tab never shows "not started" for a scored match.
+        final partial = ApiService.withPartialScorecard(_match);
+        if (!identical(partial, _match)) {
+          setState(() => _match = partial);
+        }
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text(
-                  'Could not refresh — showing last verified data.')),
+          SnackBar(content: Text(svc.detailFailureMessage)),
         );
       }
     } catch (_) {
@@ -1072,6 +1103,29 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
     return out;
   }
 
+  /// SQUAD LIVE v6 — status-aware scorecard empty text. A live or
+  /// finished match without innings must never be described as
+  /// "not started yet": that wording is reserved for a genuinely
+  /// not-started match (no scores, not effectively live, not
+  /// completed). [isEffectivelyLive] also catches a provider that
+  /// mislabels an in-progress match as upcoming while scores are
+  /// on the board.
+  String _scorecardEmptyText(LanguageProvider lang) {
+    if (_match.isEffectivelyLive) {
+      return lang.isHindi
+          ? 'यह मैच लाइव है, लेकिन प्रोवाइडर ने अभी स्कोरकार्ड नहीं भेजा है।'
+          : 'This match is live, but the provider has not sent a scorecard yet.';
+    }
+    if (_match.isCompleted) {
+      return lang.isHindi
+          ? 'यह मैच खत्म हो गया है, लेकिन प्रोवाइडर ने स्कोरकार्ड नहीं भेजा है।'
+          : 'This match has finished, but the provider has not sent a scorecard for it.';
+    }
+    return lang.isHindi
+        ? 'यह मैच अभी शुरू नहीं हुआ है या प्रोवाइडर ने स्कोरकार्ड नहीं भेजा है।'
+        : 'This match has not started yet, or the provider has not sent a scorecard for it.';
+  }
+
   Widget _scorecardTab(LanguageProvider lang) {
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 20, 14, 14),
@@ -1179,14 +1233,30 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                     style: const TextStyle(
                         fontWeight: FontWeight.w900, fontSize: 16)),
                 const SizedBox(height: 6),
-                Text(
-                    lang.isHindi
-                        ? 'यह मैच अभी शुरू नहीं हुआ है या प्रोवाइडर ने स्कोरकार्ड नहीं भेजा है।'
-                        : 'This match has not started yet, or the provider has not sent a scorecard for it.',
+                // SQUAD LIVE v6: status-aware empty text. The old
+                // line said "not started yet" for EVERY empty tab —
+                // including a LIVE match whose detail fetch had
+                // failed, which is exactly what the 2026-10-25
+                // phone screenshot showed. Only a genuinely
+                // not-started match may say "not started yet"; a
+                // live/finished match without a scorecard says the
+                // provider has not sent one yet, and any totals on
+                // the board are shown below instead of hidden.
+                Text(_scorecardEmptyText(lang),
                     maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                         color: AppTheme.textSecondary, fontSize: 13)),
+                if (_match.scores.any((s) => s.isMeaningful)) ...[
+                  const SizedBox(height: 8),
+                  for (final s in _match.scores.where((s) => s.isMeaningful))
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 2),
+                      child: Text('${s.team}: ${s.display}',
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 13)),
+                    ),
+                ],
                 if (_lastUpdatedLabel() != null) ...[
                   const SizedBox(height: 6),
                   Text(_lastUpdatedLabel()!,
@@ -1641,6 +1711,92 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
 
   // ---------------- SQUAD / PREDICTION ----------------
 
+  /// SQUAD LIVE v6 — Lineup is DISTINCT from Squad. Squad = the
+  /// full squad lists below; Lineup = who is actually playing.
+  /// No provider in the stack exposes an official Playing XI list,
+  /// so this section NEVER invents one and NEVER presents an
+  /// archive/full squad as the XI:
+  /// - Scorecard proves players on the field (batted or bowled) →
+  ///   show them under the exact label "confirmed on field", with
+  ///   an explicit "not the official Playing XI" note, and a
+  ///   Bench-unknown line (a scorecard alone cannot prove a bench).
+  /// - Nothing proven → NO lineup section at all, just one honest
+  ///   line that the free provider has not supplied an official XI.
+  /// The section uses ONLY [_match] fields (real innings rows),
+  /// never the archive-resolved squads below it.
+  Widget _lineupSection() {
+    final lineup = ApiService.lineupForMatch(_match);
+    if (!lineup.hasConfirmed) {
+      return const Padding(
+        padding: EdgeInsets.only(bottom: 10),
+        child: Text(
+            'Official Playing XI not supplied by the free provider yet — the squads below are full squads, not the XI.',
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+                color: AppTheme.textSecondary, fontSize: 12)),
+      );
+    }
+    // Compact horizontal chip strips, NOT a tall vertical list or
+    // a multi-row Wrap: the lineup sits ABOVE the full squads, so
+    // anything tall pushes the Team A header out of the first
+    // viewport (a widget test asserts it is visible at scroll 0,
+    // and on a phone the squads would be buried the same way).
+    // One 34px strip per team keeps the header + both teams +
+    // the Team A squad header all visible at a glance.
+    Widget confirmedTeam(String team, List<String> names) {
+      if (names.isEmpty) return const SizedBox.shrink();
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('$team — confirmed',
+              style: const TextStyle(fontWeight: FontWeight.w800)),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 34,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: names.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) => Container(
+                alignment: Alignment.center,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10),
+                decoration: BoxDecoration(
+                  border: Border.all(color: AppTheme.gold),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Text(names[i],
+                    style: const TextStyle(fontSize: 13)),
+              ),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const PremiumSectionHeader(
+            title: 'Lineup — confirmed on field',
+            icon: Icons.sports_cricket),
+        const Padding(
+          padding: EdgeInsets.only(bottom: 10),
+          child: Text(
+              'Confirmed on field from the live scorecard — not the official Playing XI. Bench is not supplied by the free provider yet.',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                  color: AppTheme.textSecondary, fontSize: 12)),
+        ),
+        confirmedTeam(_match.teamA, lineup.confirmedA),
+        confirmedTeam(_match.teamB, lineup.confirmedB),
+      ],
+    );
+  }
+
   Widget _squadTab() {
     return FutureBuilder(
       future: Future.wait([_playersFuture, _squadsFuture]),
@@ -1739,6 +1895,10 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                 );
               },
             ),
+            // SQUAD LIVE v6: Lineup (Playing XI / Bench) is
+            // distinct from Squad — shown above the full squads,
+            // or just the honest no-XI line when nothing is proven.
+            _lineupSection(),
             teamSection(_match.teamA, squadA, _match.teamB, srcA),
             teamSection(_match.teamB, squadB, _match.teamA, srcB),
             if (squadA.isEmpty && squadB.isEmpty)
@@ -1775,6 +1935,10 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
         _h2hFuture,
         _venueFuture,
         _matchupsFuture,
+        // MERGE v6: the loaded Cricsheet service itself, for the
+        // players-at-venue section below. loadBundled is cached
+        // per app run, so this parses nothing twice.
+        CricsheetService.loadBundled(),
       ]),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
@@ -1807,6 +1971,7 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
         final csH2H = snap.data![3] as Map<String, int>;
         final csVenue = snap.data![4] as VenueStats?;
         final csMatchups = snap.data![5] as List<Matchup>;
+        final cs = snap.data![6] as CricsheetService;
         final venue = venues.where((v) =>
             (_match.venueId.isNotEmpty && v.id == _match.venueId) ||
             (v.name.isNotEmpty && v.name == _match.venueName)).firstOrNull;
@@ -1945,6 +2110,18 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
                 ],
               ),
             ),
+            // MERGE v6: players AT this venue — the 2026-10-25
+            // phone complaint ("venue me player ka data nahi hai").
+            // Squad members of THIS match first, then all-time
+            // venue leaders, all from the full-archive aggregate.
+            // Absent = skipped, never zero-filled; rows open the
+            // same profile as the Squad tab.
+            if (_match.venueName.isNotEmpty) ...[
+              const PremiumSectionHeader(
+                  title: 'Players At This Venue',
+                  icon: Icons.person_outline),
+              _venuePlayersSection(cs, squadA, squadB),
+            ],
             // H2HCard carries its own 'Head-to-Head' title — no
             // duplicate section header above it.
             H2HCard(
@@ -2009,6 +2186,123 @@ class _MatchDetailScreenState extends State<MatchDetailScreen>
           ],
         );
       },
+    );
+  }
+
+  /// MERGE v6 — players at this venue, from the full-archive
+  /// aggregate (DATA squad's playerVenueStats / topPlayersAtVenue).
+  /// Squad members of THIS match first (top 5 per team by runs,
+  /// then wickets), then all-time venue leaders. A player's own
+  /// team string is passed to the resolver so a provider name like
+  /// "UAE" never has to match the Cricsheet team string. Rows with
+  /// no matches at the venue are skipped; when nothing exists at
+  /// all the section says so honestly instead of showing zeros.
+  Widget _venuePlayersSection(
+      CricsheetService cs, List<Player> squadA, List<Player> squadB) {
+    String detailLine(PlayerVenueStats v) {
+      final parts = <String>[];
+      final m =
+          v.battingMatches > 0 ? v.battingMatches : v.bowlingMatches;
+      if (m > 0) parts.add('$m match${m == 1 ? '' : 'es'}');
+      if (v.runs > 0) parts.add('${v.runs} runs');
+      if (v.wickets > 0) parts.add('${v.wickets} wkts');
+      return parts.join(' • ');
+    }
+
+    Widget row(String name, String detail) => InkWell(
+          onTap: () => _openPlayerByName(name),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w800, fontSize: 13)),
+                ),
+                const SizedBox(width: 8),
+                Text(detail,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: AppTheme.textSecondary, fontSize: 12)),
+              ],
+            ),
+          ),
+        );
+
+    List<PlayerVenueStats> topFor(List<Player> squad) {
+      final rows = <PlayerVenueStats>[];
+      for (final p in squad) {
+        final v =
+            cs.playerVenueStats(p.name, _match.venueName, team: p.team);
+        if (v != null &&
+            (v.battingMatches > 0 || v.bowlingMatches > 0)) {
+          rows.add(v);
+        }
+      }
+      rows.sort((a, b) {
+        final r = b.runs.compareTo(a.runs);
+        return r != 0 ? r : b.wickets.compareTo(a.wickets);
+      });
+      return rows.take(5).toList();
+    }
+
+    final aRows = topFor(squadA);
+    final bRows = topFor(squadB);
+    final leaders = cs.topPlayersAtVenue(_match.venueName, limit: 5);
+    if (aRows.isEmpty &&
+        bRows.isEmpty &&
+        leaders.batters.isEmpty &&
+        leaders.bowlers.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.only(bottom: 10),
+        child: Text(
+            'No player records at this venue in the loaded data yet.',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+                color: AppTheme.textSecondary, fontSize: 13)),
+      );
+    }
+    const subhead = TextStyle(
+        color: AppTheme.goldSoft,
+        fontSize: 12,
+        fontWeight: FontWeight.w700);
+    return KingGradientCard(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (aRows.isNotEmpty) ...[
+            Text('${_match.teamA} at this venue', style: subhead),
+            for (final v in aRows) row(v.shortName, detailLine(v)),
+            const SizedBox(height: 6),
+          ],
+          if (bRows.isNotEmpty) ...[
+            Text('${_match.teamB} at this venue', style: subhead),
+            for (final v in bRows) row(v.shortName, detailLine(v)),
+            const SizedBox(height: 6),
+          ],
+          if (leaders.batters.isNotEmpty) ...[
+            const Text('Venue leaders — batting', style: subhead),
+            for (final v in leaders.batters)
+              row(v.shortName, '${v.matches} matches • ${v.runs} runs'),
+            const SizedBox(height: 6),
+          ],
+          if (leaders.bowlers.isNotEmpty) ...[
+            const Text('Venue leaders — bowling', style: subhead),
+            for (final v in leaders.bowlers)
+              row(v.shortName, '${v.matches} matches • ${v.wickets} wkts'),
+          ],
+          const SizedBox(height: 4),
+          const Text('History: Real • Cricsheet',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: AppTheme.goldSoft, fontSize: 12)),
+        ],
+      ),
     );
   }
 
