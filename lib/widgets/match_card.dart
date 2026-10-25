@@ -237,16 +237,31 @@ class KingMatchCard extends StatelessWidget {
                   const Icon(Icons.arrow_forward,
                       size: 14, color: AppTheme.goldLight),
                   const SizedBox(width: 4),
-                  Text(
-                      upcoming
-                          ? 'Tap for match details'
-                          : 'Tap for FULL scorecard',
-                      style: const TextStyle(
-                          color: AppTheme.goldLight,
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700)),
-                  const Spacer(),
+                  // MERGE v6: CTA row must never overflow at phone
+                  // widths (390dp test showed a 94px RenderFlex
+                  // overflow — mostly the test font's wide glyphs,
+                  // but a large accessibility text scale overflows
+                  // for real). The first label flexes with ellipsis
+                  // and pushes the trailing label right, so no
+                  // Spacer is needed (Spacer + Expanded would split
+                  // the free space and strand the trailing label
+                  // mid-card).
+                  Expanded(
+                    child: Text(
+                        upcoming
+                            ? 'Tap for match details'
+                            : 'Tap for FULL scorecard',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            color: AppTheme.goldLight,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700)),
+                  ),
+                  const SizedBox(width: 8),
                   Text(upcoming ? 'Details →' : 'Scorecard →',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                           color: AppTheme.gold, fontSize: 12)),
                 ],
